@@ -139,6 +139,45 @@ ip route flush cache
   [ -n "$DNS1" ] && echo "nameserver $DNS1"
   [ -n "$DNS2" ] && echo "nameserver $DNS2"
 } > /data/local/tmp/resolv.conf
+DNSMASQ="$MINIROOT/usr/sbin/dnsmasq"
+DNSP=5353
+UP1="${DNS1:-1.1.1.1}"
+UP2="${DNS2:-8.8.8.8}"
+IPT="$(command -v iptables || command -v iptables-nft || echo iptables)"
+
+if [ -x "$DNSMASQ" ]; then
+  # 停旧实例
+  if [ -f /data/local/tmp/dnsmasq-pppoe.pid ]; then
+    kill -TERM "$(cat /data/local/tmp/dnsmasq-pppoe.pid)" 2>/dev/null || true
+    rm -f /data/local/tmp/dnsmasq-pppoe.pid
+  fi
+
+  # 用 musl 链接器启动 dnsmasq（保持和 pppd 一致的 loader + lib 路径）
+  "$MINIROOT/lib/ld-musl-aarch64.so.1" \
+    --library-path "$MINIROOT/lib:$MINIROOT/usr/lib" \
+    "$DNSMASQ" \
+      --no-resolv --server="$UP1" --server="$UP2" \
+      --listen-address=127.0.0.1 --port=$DNSP --bind-interfaces \
+      --user=nobody --group=nobody \
+      --cache-size=500 --dns-forward-max=200 \
+      --pid-file=/data/local/tmp/dnsmasq-pppoe.pid \
+      --log-facility=/data/local/tmp/dnsmasq.log \
+      --log-async=50 >/dev/null 2>&1 &
+
+  # 把本机所有发往 :53 的流量重定向到 127.0.0.1:5353（排除 dnsmasq 自己以防自吃）
+  NUID="$(id -u nobody 2>/dev/null || echo 9999)"
+  $IPT -t nat -D OUTPUT -m owner --uid-owner "$NUID" -j RETURN 2>/dev/null || true
+  $IPT -t nat -D OUTPUT -p udp --dport 53 -j REDIRECT --to-ports $DNSP 2>/dev/null || true
+  $IPT -t nat -D OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports $DNSP 2>/dev/null || true
+
+  if ! $IPT -t nat -A OUTPUT -m owner --uid-owner "$NUID" -j RETURN 2>/dev/null; then
+    # 某些内核没 xt_owner：退化为放行 127.0.0.1
+    $IPT -t nat -A OUTPUT -d 127.0.0.1/32 -p udp --dport 53 -j RETURN
+    $IPT -t nat -A OUTPUT -d 127.0.0.1/32 -p tcp --dport 53 -j RETURN
+  fi
+  $IPT -t nat -A OUTPUT -p udp --dport 53 -j REDIRECT --to-ports $DNSP
+  $IPT -t nat -A OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports $DNSP
+fi
 
 exit 0
 EOS
@@ -190,6 +229,17 @@ logfile $LOG_FILE
 persist
 maxfail 0
 holdoff 5
+IPT="$(command -v iptables || command -v iptables-nft || echo iptables)"
+NUID="$(id -u nobody 2>/dev/null || echo 9999)"
+DNSP=5353
+[ -f /data/local/tmp/dnsmasq-pppoe.pid ] && kill -TERM "$(cat /data/local/tmp/dnsmasq-pppoe.pid)" 2>/dev/null
+rm -f /data/local/tmp/dnsmasq-pppoe.pid
+$IPT -t nat -D OUTPUT -m owner --uid-owner "$NUID" -j RETURN 2>/dev/null || true
+$IPT -t nat -D OUTPUT -d 127.0.0.1/32 -p udp --dport 53 -j RETURN 2>/dev/null || true
+$IPT -t nat -D OUTPUT -d 127.0.0.1/32 -p tcp --dport 53 -j RETURN 2>/dev/null || true
+$IPT -t nat -D OUTPUT -p udp --dport 53 -j REDIRECT --to-ports $DNSP 2>/dev/null || true
+$IPT -t nat -D OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports $DNSP 2>/dev/null || true
+
 EOF
 chmod 0600 "$OPTFILE"
 
