@@ -1,0 +1,7 @@
+id=pppoe-enabler
+name=Android PPPoE Enabler
+version=v1.0
+versionCode=1
+author=YourName
+description=Enables PPPoE dialing capability on Android 13+ using pppd 2.5.3-dev.
+
