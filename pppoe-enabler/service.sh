@@ -115,33 +115,26 @@ list_ifaces() {
 
   rm -f "$seen"
 }
-
-# 选择“第一个满足条件”的接口
 choose_iface() {
   for i in $(list_ifaces); do
-    echo "[probe] candidate: $i" >&2 # <-- 修改1: 重定向调试信息到 stderr
-    # 必须非 lo，且 state up 或者有 carrier
+    log "[probe] candidate: $i"
     [ "$i" = "lo" ] && continue
     [ -d "/sys/class/net/$i" ] || continue
-    # 如果是无线，提示 Caveat（不阻断）
     if [ -d "/sys/class/net/$i/wireless" ]; then
-      echo "[note] $i is Wi‑Fi; PPPoE 取决于 AP 是否透传 PPPoE（多数家用 AP 不透传）。"
+      log "[note] $i is Wi-Fi; PPPoE 取决于 AP 是否透传。"
     fi
-    # 确保接口 up（尽力而为）
     ip link set dev "$i" up 2>/dev/null || true
-    # 等待 operstate up（最多 5s）
     for t in 0 1 2 3 4 5; do
       state="$(cat /sys/class/net/$i/operstate 2>/dev/null || echo unknown)"
       [ "$state" = "up" ] && break
       sleep 1
     done
-    echo "$i"
-    return
+    printf '%s\n' "$i"   # ← 只输出接口名
+    return 0
   done
-  # 兜底
-  echo "[warn] No suitable interface found, falling back to eth0" >&2 # <-- 修改2: 重定向警告到 stderr
-  echo "eth0"
+  printf '%s\n' "eth0"
 }
+
 
 make_hooks() {
   local HOOKDIR="$MODDIR/hooks"
@@ -248,8 +241,6 @@ nic-$IFACE
 linkname pppoe0
 ifname ppp0
 unit 0
-pidfile $PIDFILE
-
 name $USERNAME
 user $USERNAME
 password $PASSWORD
