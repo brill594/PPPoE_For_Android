@@ -139,55 +139,56 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
 
             // Start monitoring in a coroutine
             monitoringJob = coroutineScope.launch {
-                var dnsFound = false
-                // Monitor for max 15 seconds (adjust timeout as needed)
-                for (i in 0 until 30) { // 30 * 500ms = 15 seconds
+                var connectionUp = false // 改用 connectionUp 变量
+                // 监控最多 15 秒 (可以调整超时)
+                // 注意：ping -W 1 大约需要 1 秒，加上 delay(500)，每次检查约 1.5 秒
+                for (i in 0 until 10) { // 减少循环次数以适应 ping 的耗时 (10 * 1.5s = 15s)
                     try {
-                        val peer = PppoeBridge.readPeerEnv() // This runs in the coroutine's IO context
-                        if (!peer["DNS1"].isNullOrBlank() || !peer["DNS2"].isNullOrBlank()) {
-                            Log.d("MainActivity", "DNS found in peer env.")
-                            dnsFound = true
-                            finalStatus = "Success"
-                            break // Exit loop on success
+                        // --- 修改：调用 ping 检查 ---
+                        // readPeerEnv() 不再需要在这里调用
+                        val pingSuccess = PppoeBridge.checkConnectivity() // 在 IO Coroutine Context 中运行 ping
+                        // --- 修改结束 ---
+
+                        if (pingSuccess) {
+                            Log.d("MainActivity", "Ping check successful.")
+                            connectionUp = true
+                            finalStatus = "Success (Ping)" // 更新成功状态
+                            break // 成功，退出循环
+                        } else {
+                            Log.d("MainActivity", "Ping check failed, attempt ${i + 1}/10.")
                         }
                     } catch (e: Exception) {
-                        Log.e("MainActivity", "Error reading peer env during monitoring", e)
-                        // Continue loop, maybe it's a temporary read error
+                        Log.e("MainActivity", "Error during connectivity check", e)
+                        // 可以选择在这里中断，或者继续尝试
                     }
-                    delay(500) // Wait 500ms
+                    delay(500) // 每次 ping 之后稍微等待一下再重试
                 }
 
-                if (!dnsFound && isActive) { // Check isActive to ensure job wasn't cancelled
-                    Log.w("MainActivity", "Dialing attempt timed out after 15 seconds.")
-                    finalStatus = "Timeout"
-                }else if (isActive) { // 确保 job 未被取消
-                    // 只有在明确找到 DNS 时才设置 Success
-                    finalStatus = "Success (DNS)" // 更明确的状态
+                // 根据 connectionUp 的最终结果判断状态
+                if (!connectionUp && isActive) { // 检查 isActive 确保 job 未被取消
+                    Log.w("MainActivity", "Connectivity check timed out after ~15 seconds.")
+                    finalStatus = "Timeout (Ping)" // 更新超时状态
                 }
+                // 如果 job 被取消或 start 失败，finalStatus 会是 "Unknown" 或 "Failure (Control)"
 
-                // Regardless of outcome, stop capturing and save
+                // 停止捕获并保存日志 (这部分逻辑不变)
                 isCapturingLog = false
-                saveLogAttempt(startTime, finalStatus)
+                savedLogId = saveLogAttempt(startTime, finalStatus)
 
-                // Report final status back to Flutter on main thread
+                // 向 Flutter 返回 Map 结果 (这部分逻辑不变)
                 withContext(Dispatchers.Main) {
                     val resultMap = mapOf(
                         "status" to finalStatus,
-                        "logId" to savedLogId // 将 ID 也返回
+                        "logId" to savedLogId
                     )
                     if (finalStatus.startsWith("Success")) {
-                        flutterResult.success(resultMap) // 成功时返回 Map
-                    } else {
-                        // 失败或超时也用 success 返回 Map，让 Dart 处理错误逻辑
                         flutterResult.success(resultMap)
-                        // 或者你可以选择用 error 返回，但这会进入 Dart 的 catch 块
-                        // flutterResult.error("DIAL_FAILED", "Dialing failed or timed out. Status: $finalStatus", resultMap)
+                    } else {
+                        flutterResult.success(resultMap) // 失败/超时也用 success 返回 Map
                     }
                 }
             }
 
-            // Wait for the monitoring job to complete (or be cancelled)
-            // This keeps the Thread alive until monitoring finishes
             runBlocking { monitoringJob?.join() } // Use runBlocking carefully
 
         }.start() // Start the thread that runs control("start") and manages monitoring

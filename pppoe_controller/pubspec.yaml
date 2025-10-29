@@ -37,6 +37,8 @@ dependencies:
   intl: ^0.20.2
 
 dev_dependencies:
+  flutter_launcher_icons: ^0.14.4
+
   flutter_test:
     sdk: flutter
 
@@ -49,7 +51,12 @@ dev_dependencies:
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
+flutter_launcher_icons:
+  android: "launcher_icon"
+  image_path: assets/icon.png   # 你的源图（建议 1024×1024，别带圆角/阴影）
 
+  # —— 可选：自适应图标（Android 8.0+ 更好看）——
+  adaptive_icon_background: "#FFFFFF"   # 或者 assets/icon_bg.png（1080×1080）
 # The following section is specific to Flutter packages.
 flutter:
 

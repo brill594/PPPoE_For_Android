@@ -1,11 +1,20 @@
 package com.brill.pppoe_controller.bridge
 import com.brill.pppoe_controller.su.RootShell
 import java.io.File
-
+import android.util.Log
 object PppoeBridge {
     private const val DIR = "/data/local/tmp"
     private fun f(name: String) = "$DIR/$name"
-
+    fun checkConnectivity(): Boolean {
+        // -c 1: 只发送一个包
+        // -W 1: 等待回复最多 1 秒
+        // 1.1.1.1: Cloudflare DNS (也可以用 8.8.8.8 或其他可靠 IP)
+        // RootShell.run() 返回 true 如果命令退出码为 0 (ping 通)
+        Log.d("PppoeBridge", "Attempting ping check...") // 添加日志
+        val success = RootShell.run("ping -c 1 -W 1 1.1.1.1") or RootShell.run("ping -c 1 -W 1 8.8.4.4")
+        Log.d("PppoeBridge", "Ping check result: $success") // 添加日志
+        return success
+    }
     fun writeCreds(user: String, pass: String): Boolean {
         return RootShell.run(
             "printf '%s' '${user.replace("'", "'\\''")}' > ${f("pppoe_user")}",
