@@ -2,6 +2,7 @@ package com.brill.pppoe_controller
 import com.brill.pppoe_controller.bridge.PppoeBridge
 import com.brill.pppoe_controller.vpn.PppoeVpnService
 import com.brill.pppoe_controller.su.RootShell
+import android.content.Context // 添加 Context import
 import android.content.Intent
 import android.net.VpnService
 import io.flutter.embedding.android.FlutterFragmentActivity // 注意：基类改为了 FragmentActivity
@@ -13,15 +14,22 @@ import androidx.activity.result.ActivityResult
 import android.app.Activity.RESULT_OK
 import java.io.BufferedReader // 2. 导入 BufferedReader
 import java.io.File
-import java.io.InputStreamReader
-import java.net.NetworkInterface
+import com.brill.pppoe_controller.db.AppDatabase // Add DB import
+import com.brill.pppoe_controller.db.LogEntry    // Add LogEntry import
+import com.brill.pppoe_controller.db.LogSummary  // Add LogSummary import
+import kotlinx.coroutines.* // Add Coroutine imports
+import java.util.concurrent.CopyOnWriteArrayList
 import android.util.Log
 import com.topjohnwu.superuser.Shell
 
 class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 FragmentActivity
     private val CHANNEL = "pppoe/bridge"
     private val LOG_CHANNEL = "pppoe/log_stream" // 3. 新的日志流通道
-
+    private val db by lazy { AppDatabase.getDatabase(this) } // Lazy init DB
+    private val logBuffer = CopyOnWriteArrayList<String>() // Thread-safe buffer for current attempt
+    private var isCapturingLog = false
+    private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob()) // Scope for DB operations
+    private var monitoringJob: Job? = null // Job for monitoring dial attempt
     // --- VPN 权限 ---
     private var flutterResult: MethodChannel.Result? = null
     private val vpnPermissionLauncher = registerForActivityResult(
@@ -38,7 +46,10 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
     // --- 日志流 ---
     private var logStreamProcess: Process? = null
     private var logStreamReader: BufferedReader? = null
-
+    private val PREFS_NAME = "pppoe_settings"
+    private val KEY_CUSTOM_DNS_ENABLED = "use_custom_dns"
+    private val KEY_CUSTOM_DNS1 = "custom_dns1"
+    private val KEY_CUSTOM_DNS2 = "custom_dns2"
     // 4. 定义 EventChannel StreamHandler
     private val logStreamHandler = object : EventChannel.StreamHandler {
         override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
@@ -62,9 +73,17 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
                     // 逐行读取并发送
                     logStreamReader?.forEachLine { line ->
                         if (line.isNotBlank()) {
-                            // 必须在主线程上发送
                             this@MainActivity.runOnUiThread {
+                                // Always send to live stream
                                 events.success(line)
+                                // If capturing, also add to buffer
+                                if (isCapturingLog) {
+                                    logBuffer.add(line)
+                                    // Optional: Limit buffer size to prevent memory issues
+                                    if (logBuffer.size > 1000) { // Keep last 1000 lines
+                                        logBuffer.removeFirstOrNull()
+                                    }
+                                }
                             }
                         }
                     }
@@ -92,6 +111,112 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
         }
     }
 
+    private fun startDialingAndCaptureLog(flutterResult: MethodChannel.Result) {
+        monitoringJob?.cancel() // Cancel previous monitoring if any
+        logBuffer.clear()
+        isCapturingLog = true
+        val startTime = System.currentTimeMillis()
+        var finalStatus = "Unknown" // Default status
+        var savedLogId: Long? = null // 用于保存日志 ID
+        Log.d("MainActivity", "Starting dialing attempt and log capture.")
+
+        // Initiate the 'start' command in background
+        Thread {
+            val startSuccess = PppoeBridge.control("start")
+            if (!startSuccess) {
+                Log.e("MainActivity", "PppoeBridge.control('start') failed immediately.")
+                isCapturingLog = false // Stop capturing early
+                finalStatus = "Failure (Control)"
+                // Save attempt immediately
+                coroutineScope.launch {
+                    saveLogAttempt(startTime, finalStatus) // Call suspend fun from coroutine
+                }
+                this@MainActivity.runOnUiThread {
+                    flutterResult.error("START_FAILED", "Failed to send start command", null)
+                }
+                return@Thread // Exit this thread
+            }
+
+            // Start monitoring in a coroutine
+            monitoringJob = coroutineScope.launch {
+                var dnsFound = false
+                // Monitor for max 15 seconds (adjust timeout as needed)
+                for (i in 0 until 30) { // 30 * 500ms = 15 seconds
+                    try {
+                        val peer = PppoeBridge.readPeerEnv() // This runs in the coroutine's IO context
+                        if (!peer["DNS1"].isNullOrBlank() || !peer["DNS2"].isNullOrBlank()) {
+                            Log.d("MainActivity", "DNS found in peer env.")
+                            dnsFound = true
+                            finalStatus = "Success"
+                            break // Exit loop on success
+                        }
+                    } catch (e: Exception) {
+                        Log.e("MainActivity", "Error reading peer env during monitoring", e)
+                        // Continue loop, maybe it's a temporary read error
+                    }
+                    delay(500) // Wait 500ms
+                }
+
+                if (!dnsFound && isActive) { // Check isActive to ensure job wasn't cancelled
+                    Log.w("MainActivity", "Dialing attempt timed out after 15 seconds.")
+                    finalStatus = "Timeout"
+                }else if (isActive) { // 确保 job 未被取消
+                    // 只有在明确找到 DNS 时才设置 Success
+                    finalStatus = "Success (DNS)" // 更明确的状态
+                }
+
+                // Regardless of outcome, stop capturing and save
+                isCapturingLog = false
+                saveLogAttempt(startTime, finalStatus)
+
+                // Report final status back to Flutter on main thread
+                withContext(Dispatchers.Main) {
+                    val resultMap = mapOf(
+                        "status" to finalStatus,
+                        "logId" to savedLogId // 将 ID 也返回
+                    )
+                    if (finalStatus.startsWith("Success")) {
+                        flutterResult.success(resultMap) // 成功时返回 Map
+                    } else {
+                        // 失败或超时也用 success 返回 Map，让 Dart 处理错误逻辑
+                        flutterResult.success(resultMap)
+                        // 或者你可以选择用 error 返回，但这会进入 Dart 的 catch 块
+                        // flutterResult.error("DIAL_FAILED", "Dialing failed or timed out. Status: $finalStatus", resultMap)
+                    }
+                }
+            }
+
+            // Wait for the monitoring job to complete (or be cancelled)
+            // This keeps the Thread alive until monitoring finishes
+            runBlocking { monitoringJob?.join() } // Use runBlocking carefully
+
+        }.start() // Start the thread that runs control("start") and manages monitoring
+    }
+
+    // 返回插入的 ID (Long)，如果失败则返回 null
+    private suspend fun saveLogAttempt(startTime: Long, status: String): Long? { // 修改返回类型
+        val capturedLog = logBuffer.joinToString("\n")
+        logBuffer.clear()
+        val entry = LogEntry(
+            timestamp = startTime,
+            logContent = capturedLog,
+            status = status
+        )
+        return try {
+            val insertedId = db.logEntryDao().insert(entry) // insert 返回 Long
+            Log.d("MainActivity", "Saved log attempt with ID: $insertedId, Status: $status")
+            insertedId // 返回 ID
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Failed to save log entry to database", e)
+            null // 保存失败返回 null
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        monitoringJob?.cancel() // Cancel monitoring if activity is destroyed
+        coroutineScope.cancel() // Cancel the coroutine scope
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -148,8 +273,6 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
                         }
                     }
 
-                    // *** 删除了 "readLog" ***
-                    // 它现在被上面的 EventChannel 处理了
 
                     "readPeerEnv" -> {
                         Thread {
@@ -166,11 +289,27 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
                             result.success(true)
                         }
                     }
-                    "startVpn" -> {
-                        val i = Intent(this, PppoeVpnService::class.java)
-                            .setAction(PppoeVpnService.ACT_START)
-                        startForegroundService(i)
-                        result.success(true)
+                    "updateLogStatus" -> {
+                        val id = call.argument<Long>("id")
+                        val status = call.argument<String>("status")
+                        if (id == null || status == null) {
+                            result.error("INVALID_ARGS", "ID and Status cannot be null", null)
+                        } else {
+                            coroutineScope.launch {
+                                val entry = db.logEntryDao().getById(id)
+                                if (entry != null) {
+                                    entry.status = status // 更新状态
+                                    db.logEntryDao().update(entry)
+                                    Log.d("MainActivity", "Updated log entry $id status to: $status")
+                                    withContext(Dispatchers.Main) { result.success(true) }
+                                } else {
+                                    withContext(Dispatchers.Main) { result.error("NOT_FOUND", "Log entry not found for status update", null) }
+                                }
+                            }
+                        }
+                    }
+                    "startDialingAttempt" -> {
+                        startDialingAndCaptureLog(result) // Call new function
                     }
                     "stopVpn" -> {
                         val i = Intent(this, PppoeVpnService::class.java)
@@ -178,6 +317,105 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
                         startService(i)
                         result.success(true)
                     }
+                    // --- History Methods ---
+                    "getLogHistory" -> {
+                        coroutineScope.launch {
+                            val history = db.logEntryDao().getAllSummaries()
+                            // Convert to Map for Flutter compatibility
+                            val historyMapList = history.map {
+                                mapOf("id" to it.id, "timestamp" to it.timestamp, "note" to it.note, "status" to it.status)
+                            }
+                            withContext(Dispatchers.Main) {
+                                result.success(historyMapList)
+                            }
+                        }
+                    }
+                    "startVpn" -> {
+                        Log.d("MainActivity", "[DEBUG] Received 'startVpn' call from Flutter.") // <-- Add Log
+                        val i = Intent(this, PppoeVpnService::class.java)
+                            .setAction(PppoeVpnService.ACT_START)
+                        startForegroundService(i)
+                        Log.d("MainActivity", "[DEBUG] Called startForegroundService for PppoeVpnService.") // <-- Add Log
+                        result.success(true)
+                    }
+                    "getLogDetails" -> {
+                        val id = call.argument<Long>("id")
+                        if (id == null) {
+                            result.error("INVALID_ARGS", "ID cannot be null", null)
+                        } else {
+                            coroutineScope.launch {
+                                val entry = db.logEntryDao().getById(id)
+                                withContext(Dispatchers.Main) {
+                                    if (entry != null) {
+                                        result.success(mapOf(
+                                            "id" to entry.id,
+                                            "timestamp" to entry.timestamp,
+                                            "note" to entry.note,
+                                            "logContent" to entry.logContent,
+                                            "status" to entry.status
+                                        ))
+                                    } else {
+                                        result.error("NOT_FOUND", "Log entry not found", null)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "updateLogNote" -> {
+                        val id = call.argument<Long>("id")
+                        val note = call.argument<String?>("note") // Allow null note
+                        if (id == null) {
+                            result.error("INVALID_ARGS", "ID cannot be null", null)
+                        } else {
+                            coroutineScope.launch {
+                                val entry = db.logEntryDao().getById(id)
+                                if (entry != null) {
+                                    entry.note = note // Update the note
+                                    db.logEntryDao().update(entry)
+                                    withContext(Dispatchers.Main) { result.success(true) }
+                                } else {
+                                    withContext(Dispatchers.Main) { result.error("NOT_FOUND", "Log entry not found", null) }
+                                }
+                            }
+                        }
+                    }
+                    "saveDnsSettings" -> {
+                        val useCustom = call.argument<Boolean>("useCustom")
+                        val dns1 = call.argument<String>("dns1")
+                        val dns2 = call.argument<String>("dns2")
+                        if (useCustom == null) {
+                            result.error("INVALID_ARGS", "useCustom is required", null)
+                            return@setMethodCallHandler
+                        }
+                        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                        prefs.putBoolean(KEY_CUSTOM_DNS_ENABLED, useCustom)
+                        prefs.putString(KEY_CUSTOM_DNS1, dns1?.trim()) // 保存 trim 后的值
+                        prefs.putString(KEY_CUSTOM_DNS2, dns2?.trim())
+                        prefs.apply() // 异步保存
+                        result.success(true)
+                    }
+                    // --- 新增: 读取 DNS 设置 ---
+                    "loadDnsSettings" -> {
+                        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                        val settings = mapOf(
+                            "useCustom" to prefs.getBoolean(KEY_CUSTOM_DNS_ENABLED, false),
+                            "dns1" to prefs.getString(KEY_CUSTOM_DNS1, ""),
+                            "dns2" to prefs.getString(KEY_CUSTOM_DNS2, "")
+                        )
+                        result.success(settings)
+                    }
+                    "deleteLogEntry" -> {
+                        val id = call.argument<Long>("id")
+                        if (id == null) {
+                            result.error("INVALID_ARGS", "ID cannot be null", null)
+                        } else {
+                            coroutineScope.launch {
+                                db.logEntryDao().deleteById(id)
+                                withContext(Dispatchers.Main) { result.success(true) }
+                            }
+                        }
+                    }
+
                     "getNetworkInterfaces" -> {
                         Log.d("MainActivity", "Handling 'getNetworkInterfaces' call.") // Log B
                         // Switch to a background thread
@@ -222,4 +460,5 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
                 }
             }
     }
+
 }
