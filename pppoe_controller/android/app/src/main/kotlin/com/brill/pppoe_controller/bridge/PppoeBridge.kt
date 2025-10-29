@@ -29,7 +29,10 @@ object PppoeBridge {
 
     fun control(cmd: String): Boolean {
         // e.g. "start" / "stop" / "cycle" / "switch eth0"
-        return RootShell.run("printf '%s' '$cmd' > ${f("pppoe_control")}")
+        // 使用 echo 并确保对命令中的特殊字符进行转义 (虽然 start/stop/cycle 通常不需要)
+        // 注意：简单的 echo 可能不足以处理复杂的 cmd，但对于 start/stop/cycle 足够
+        val escapedCmd = cmd.replace("'", "'\\''") // 基本的单引号转义
+        return RootShell.run("echo '$escapedCmd' > ${f("pppoe_control")}")
     }
 
     fun readLog(): String = runCatching { File(f("pppoe.log")).readText() }.getOrElse { "" }

@@ -2,7 +2,26 @@ import 'package:flutter/services.dart';
 
 class PppoeBridge {
   static const _ch = MethodChannel('pppoe/bridge');
+  static const _channel = MethodChannel('pppoe/bridge');
+  // 1. 添加新的 EventChannel
+  static const _logChannel = EventChannel('pppoe/log_stream');
 
+  // 2. 创建一个 getter 来暴露日志流
+  static Stream<String> get logStream {
+    // 强制转换为 String
+    return _logChannel.receiveBroadcastStream().map((event) => event as String);
+  }
+  static Future<List<String>> getNetworkInterfaces() async {
+    try {
+      final List<dynamic>? interfaces = await _channel.invokeMethod('getNetworkInterfaces');
+      // 将 List<dynamic> 转换为 List<String>
+      return interfaces?.map((e) => e.toString()).toList() ?? [];
+    } catch (e) {
+      // 发生错误时返回空列表
+      print("Error getting network interfaces: $e");
+      return [];
+    }
+  }
   static Future<bool> writeCreds(String user, String pass) async {
     final ok = await _ch.invokeMethod<bool>('writeCreds', {'user': user, 'pass': pass});
     return ok ?? false;
@@ -21,12 +40,6 @@ class PppoeBridge {
   static Future<bool> control(String cmd) async {
     final ok = await _ch.invokeMethod<bool>('control', {'cmd': cmd});
     return ok ?? false;
-  }
-
-  static Future<String> readLog() async {
-    final s = await _ch.invokeMethod<String>('readLog');
-    return s ?? '';
-    // 如需截断/限制长度，可在这里处理
   }
 
   static Future<Map<String, String>> readPeerEnv() async {

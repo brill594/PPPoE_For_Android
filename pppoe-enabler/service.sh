@@ -119,7 +119,7 @@ list_ifaces() {
 # 选择“第一个满足条件”的接口
 choose_iface() {
   for i in $(list_ifaces); do
-    echo "[probe] candidate: $i"
+    echo "[probe] candidate: $i" >&2 # <-- 修改1: 重定向调试信息到 stderr
     # 必须非 lo，且 state up 或者有 carrier
     [ "$i" = "lo" ] && continue
     [ -d "/sys/class/net/$i" ] || continue
@@ -139,6 +139,7 @@ choose_iface() {
     return
   done
   # 兜底
+  echo "[warn] No suitable interface found, falling back to eth0" >&2 # <-- 修改2: 重定向警告到 stderr
   echo "eth0"
 }
 
@@ -194,6 +195,7 @@ EOF
 
 start_pppoe_with_iface() {
   local IFACE="$1"
+  echo "[DEBUG start_iface] Received IFACE='$IFACE'" # <-- 新日志 1
   prep_binaries
 
   USERNAME="$(cat "$USER_FILE" 2>/dev/null || true)"
@@ -201,12 +203,13 @@ start_pppoe_with_iface() {
   MTU_MRU="$(resolve_mtu_mru)"
   MTU="$(echo "$MTU_MRU" | awk '{print $1}')"
   MRU="$(echo "$MTU_MRU" | awk '{print $2}')"
-
+  echo "[DEBUG start_iface] Checking existence of /sys/class/net/$IFACE" # <-- 新日志 2
   if [ ! -d "/sys/class/net/$IFACE" ]; then
+    echo "[DEBUG start_iface] Directory check FAILED for '$IFACE'" # <-- 新日志 3
     echo "[error] iface not found: $IFACE"
     return 1
   fi
-
+  echo "[DEBUG start_iface] Directory check PASSED for '$IFACE'" # <-- 新日志 4
   if ! mkdir "$LOCKDIR" 2>/dev/null; then
     if [ ! -f "$PIDFILE" ] || ! kill -0 "$(cat "$PIDFILE" 2>/dev/null || echo 0)" 2>/dev/null; then
       rmdir "$LOCKDIR" 2>/dev/null || true
@@ -301,32 +304,40 @@ start_pppoe() {
 }
 
 stop_pppoe() {
+  echo "[DEBUG] Entering stop_pppoe" >> "$LOG_FILE" 2>&1 # <--- 添加
   set +e
+  echo "[DEBUG] Step 1: Checking PID file" >> "$LOG_FILE" 2>&1 # <--- 添加
   if [ -f "$PIDFILE" ]; then
     PID="$(cat "$PIDFILE" 2>/dev/null)"
     [ -n "$PID" ] && kill -TERM "$PID" 2>/dev/null
   fi
+  echo "[DEBUG] Step 2: Running killall/pkill TERM" >> "$LOG_FILE" 2>&1 # <--- 添加
   killall -TERM ppp_daemon pppd 2>/dev/null
   pkill -f "/data/local/tmp/ppp_daemon" 2>/dev/null
   pkill -f "plugin .*pppoe.so" 2>/dev/null
+  echo "[DEBUG] Step 3: Entering wait loop" >> "$LOG_FILE" 2>&1 # <--- 添加
 
   for i in 1 2 3; do
     sleep 1
     pgrep -f "/data/local/tmp/ppp_daemon|pppd" >/dev/null 2>&1 || break
   done
+  echo "[DEBUG] Step 4: Checking pgrep before KILL" >> "$LOG_FILE" 2>&1 # <--- 添加
   pgrep -f "/data/local/tmp/pppoe_daemon|pppd" >/dev/null 2>&1 && \
-    killall -KILL ppp_daemon pppd 2>/dev/null
+    killall -KILL ppp_daemon pppd 2>/dev/null && echo "[DEBUG] Step 5: Running killall KILL" >> "$LOG_FILE" 2>&1 && killall -KILL ... # <--- 添加
 
+  echo "[DEBUG] Step 6: Running ip cleanup" >> "$LOG_FILE" 2>&1 # <--- 添加
   ip link del ppp0 2>/dev/null
   ip route del default dev ppp0 2>/dev/null
   ip rule  del pref 10000 lookup main 2>/dev/null
   ip route flush cache
-
+  echo "[DEBUG] Step 7: Running file cleanup" >> "$LOG_FILE" 2>&1 # <--- 添加
   rm -f "$PIDFILE"
   rm -rf "$LOCKDIR"
   echo "IF=" > "$PEER_ENV" 2>/dev/null || true
   chmod 0644 "$PEER_ENV" 2>/dev/null || true
+  echo "[DEBUG] Step 8: Logging Stop command sent" >> "$LOG_FILE" 2>&1 # <--- 添加
   echo "Stop command sent."
+  echo "[DEBUG] Exiting stop_pppoe successfully" >> "$LOG_FILE" 2>&1 # <--- 添加
   set -e
 }
 
@@ -347,9 +358,9 @@ main_loop() {
       CMD="$(cat "$CONTROL_FILE" 2>/dev/null || echo)"
       rm -f "$CONTROL_FILE" || true
       case "$CMD" in
-        start) start_pppoe ;;
-        stop)  stop_pppoe  ;;
-        cycle) stop_pppoe; cycle_iface; start_pppoe ;;
+        start) start_pppoe || true ;;
+        stop)  stop_pppoe  || true ;;
+        cycle) stop_pppoe || true; cycle_iface; start_pppoe || true ;;
         switch\ *)
           tgt="$(echo "$CMD" | awk '{print $2}')"
           if [ -n "$tgt" ]; then
