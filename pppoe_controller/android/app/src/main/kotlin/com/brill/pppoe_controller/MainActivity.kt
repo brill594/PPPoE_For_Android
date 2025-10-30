@@ -1,7 +1,6 @@
 package com.brill.pppoe_controller
 import com.brill.pppoe_controller.bridge.PppoeBridge
 import com.brill.pppoe_controller.vpn.PppoeVpnService
-import com.brill.pppoe_controller.su.RootShell
 import android.content.Context // 添加 Context import
 import android.content.Intent
 import android.net.VpnService
@@ -11,12 +10,10 @@ import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.EventChannel // 1. 导入 EventChannel
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.ActivityResult
-import android.app.Activity.RESULT_OK
 import java.io.BufferedReader // 2. 导入 BufferedReader
 import java.io.File
 import com.brill.pppoe_controller.db.AppDatabase // Add DB import
 import com.brill.pppoe_controller.db.LogEntry    // Add LogEntry import
-import com.brill.pppoe_controller.db.LogSummary  // Add LogSummary import
 import kotlinx.coroutines.* // Add Coroutine imports
 import java.util.concurrent.CopyOnWriteArrayList
 import android.util.Log
@@ -31,6 +28,7 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
     private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob()) // Scope for DB operations
     private var monitoringJob: Job? = null // Job for monitoring dial attempt
     // --- VPN 权限 ---
+    private val mainScope = CoroutineScope(Dispatchers.Main)
     private var flutterResult: MethodChannel.Result? = null
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -318,6 +316,37 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
                         startService(i)
                         result.success(true)
                     }
+                    "shareLogAsText" -> {
+                        try {
+                            val text = call.argument<String>("text")
+                            val subject = call.argument<String>("subject")
+
+                            if (text == null || subject == null) {
+                                result.error("INVALID_ARGS", "Text or Subject cannot be null", null)
+                                return@setMethodCallHandler
+                            }
+
+                            // 1. 创建原生的 ACTION_SEND Intent
+                            val sendIntent = Intent().apply {
+                                action = Intent.ACTION_SEND
+                                putExtra(Intent.EXTRA_TEXT, text)
+                                putExtra(Intent.EXTRA_SUBJECT, subject)
+                                type = "text/plain"
+                            }
+
+                            // 2. 创建一个“选择器”
+                            val shareIntent = Intent.createChooser(sendIntent, "Share Log via...")
+
+                            // 3. 启动 Activity (这会自动弹出分享窗口)
+                            //    我们是在 MainActivity 内部，所以可以直接调用 startActivity
+                            startActivity(shareIntent)
+
+                            result.success(true)
+
+                        } catch (e: Exception) {
+                            result.error("SHARE_ERROR", e.message, e.stackTraceToString())
+                        }
+                    }
                     // --- History Methods ---
                     "getLogHistory" -> {
                         coroutineScope.launch {
@@ -340,42 +369,66 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
                         result.success(true)
                     }
                     "getLogDetails" -> {
-                        val id = call.argument<Long>("id")
+                        // --- 修正类型转换 ---
+                        val idAsNumber = call.argument<Number>("id")
+                        val id = idAsNumber?.toLong()
+                        // --- 结束修正 ---
+
                         if (id == null) {
                             result.error("INVALID_ARGS", "ID cannot be null", null)
                         } else {
-                            coroutineScope.launch {
-                                val entry = db.logEntryDao().getById(id)
-                                withContext(Dispatchers.Main) {
-                                    if (entry != null) {
-                                        result.success(mapOf(
-                                            "id" to entry.id,
-                                            "timestamp" to entry.timestamp,
-                                            "note" to entry.note,
-                                            "logContent" to entry.logContent,
-                                            "status" to entry.status
-                                        ))
-                                    } else {
-                                        result.error("NOT_FOUND", "Log entry not found", null)
-                                    }
+                            // (确保这里使用您在类中定义的协程作用域，例如 mainScope)
+                            mainScope.launch {
+                                // (确保您的 DAO 方法是 suspend fun)
+                                val entry = withContext(Dispatchers.IO) {
+                                    db.logEntryDao().getById(id)
+                                }
+
+                                // (在主线程上返回结果)
+                                if (entry != null) {
+                                    result.success(mapOf(
+                                        "id" to entry.id,
+                                        "timestamp" to entry.timestamp,
+                                        "note" to entry.note,
+                                        "logContent" to entry.logContent,
+                                        "status" to entry.status
+                                    ))
+                                } else {
+                                    result.error("NOT_FOUND", "Log entry not found", null)
                                 }
                             }
                         }
                     }
+
                     "updateLogNote" -> {
-                        val id = call.argument<Long>("id")
+                        // --- 修正类型转换 ---
+                        val idAsNumber = call.argument<Number>("id")
+                        val id = idAsNumber?.toLong()
+                        // --- 结束修正 ---
+
                         val note = call.argument<String?>("note") // Allow null note
+
                         if (id == null) {
                             result.error("INVALID_ARGS", "ID cannot be null", null)
                         } else {
-                            coroutineScope.launch {
-                                val entry = db.logEntryDao().getById(id)
-                                if (entry != null) {
-                                    entry.note = note // Update the note
-                                    db.logEntryDao().update(entry)
-                                    withContext(Dispatchers.Main) { result.success(true) }
+                            // (确保这里使用您在类中定义的协程作用域，例如 mainScope)
+                            mainScope.launch {
+                                val success = withContext(Dispatchers.IO) {
+                                    // (确保 DAO 方法是 suspend fun)
+                                    val entry = db.logEntryDao().getById(id)
+                                    if (entry != null) {
+                                        entry.note = note // 更新 note
+                                        db.logEntryDao().update(entry)
+                                        true // 更新成功
+                                    } else {
+                                        false // 未找到
+                                    }
+                                }
+
+                                if (success) {
+                                    result.success(true)
                                 } else {
-                                    withContext(Dispatchers.Main) { result.error("NOT_FOUND", "Log entry not found", null) }
+                                    result.error("NOT_FOUND", "Log entry not found", null)
                                 }
                             }
                         }
@@ -406,17 +459,32 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
                         result.success(settings)
                     }
                     "deleteLogEntry" -> {
-                        val id = call.argument<Long>("id")
+                        val idAsNumber = call.argument<Number>("id")
+                        val id = idAsNumber?.toLong()
                         if (id == null) {
-                            result.error("INVALID_ARGS", "ID cannot be null", null)
-                        } else {
-                            coroutineScope.launch {
-                                db.logEntryDao().deleteById(id)
-                                withContext(Dispatchers.Main) { result.success(true) }
+                            result.error("INVALID_ARG", "ID is null or not a number", null)
+                            return@setMethodCallHandler
+                        }
+                        mainScope.launch {
+                            try {
+                                // 3. 切换到 IO 线程
+                                val rowsDeleted = withContext(Dispatchers.IO) {
+
+                                    // 4. (这是您的修正!)
+                                    //    db (AppDatabase) -> logEntryDao() (获取DAO) -> deleteById(id) (在DAO上操作)
+                                    db.logEntryDao().deleteById(id)
+
+                                }
+                                result.success(rowsDeleted > 0) // 如果行数 > 0，则返回 true
+                            } catch (e: Exception) {
+                                result.error(
+                                    "DB_ERROR",
+                                    "Error during database operation: ${e.message}",
+                                    e.stackTraceToString()
+                                )
                             }
                         }
                     }
-
                     "getNetworkInterfaces" -> {
                         Log.d("MainActivity", "Handling 'getNetworkInterfaces' call.") // Log B
                         // Switch to a background thread

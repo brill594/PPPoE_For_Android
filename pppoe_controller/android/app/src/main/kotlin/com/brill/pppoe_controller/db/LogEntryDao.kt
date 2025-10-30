@@ -20,7 +20,7 @@ interface LogEntryDao {
     suspend fun update(logEntry: LogEntry)
 
     @Query("DELETE FROM log_history WHERE id = :id")
-    suspend fun deleteById(id: Long)
+    suspend fun deleteById(id: Long): Int
 }
 
 // Define the projection data class for the list view

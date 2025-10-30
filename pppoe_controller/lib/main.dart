@@ -1,14 +1,20 @@
+// lib/main.dart
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'pppoe_bridge.dart';
 import 'history_screen.dart';
+import 'nothing_theme.dart'; // <-- MODIFIED: 导入新主题
+
 void main() => runApp(const App());
 
 class App extends StatelessWidget {
   const App({super.key});
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(home: Home());
+    return MaterialApp(
+      theme: getNothingTheme(), // <-- MODIFIED: 应用主题
+      home: Home(),
+    );
   }
 }
 
@@ -189,7 +195,8 @@ class _HomeState extends State<Home> {
       }
 
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(finalStatusMessage), backgroundColor: Colors.green));
+      // <-- MODIFIED: 移除了 Colors.green，使用主题默认的 SnackBar 样式
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(finalStatusMessage)));
 
     } catch (e) {
       print("[ERROR] Exception in _applyAndStart: $e");
@@ -204,7 +211,8 @@ class _HomeState extends State<Home> {
       }
 
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(displayError), backgroundColor: Colors.red));
+      // <-- MODIFIED: 使用主题中的 NothingColors.redAccent
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(displayError), backgroundColor: NothingColors.redAccent));
     }
   }
 
@@ -222,23 +230,23 @@ class _HomeState extends State<Home> {
         await PppoeBridge.startVpn();
         print("[DEBUG_TEST] startVpn called.");
         ScaffoldMessenger.of(context).hideCurrentSnackBar();
+        // <-- MODIFIED: 移除了 Colors.green
         ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Test: startVpn command sent successfully.'), backgroundColor: Colors.green)
+            const SnackBar(content: Text('Test: startVpn command sent successfully.'))
         );
       } else {
         print("[DEBUG_TEST] VPN prepareVpn returned false. Permission likely needed or denied.");
         ScaffoldMessenger.of(context).hideCurrentSnackBar();
+        // <-- MODIFIED: 移除了 Colors.orange
         ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Test: VPN permission needed or denied.'), backgroundColor: Colors.orange)
+            const SnackBar(content: Text('Test: VPN permission needed or denied.'))
         );
-        // Note: If permission was needed, the system dialog appeared,
-        // and the result is handled by the vpnPermissionLauncher callback.
-        // We don't get the direct result here if startActivityForResult was launched.
       }
     } catch (e, s) {
       print("[DEBUG_TEST] Exception in _testStartVpn: $e\n$s");
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Test Error: $e'), backgroundColor: Colors.red));
+      // <-- MODIFIED: 使用主题中的 NothingColors.redAccent
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Test Error: $e'), backgroundColor: NothingColors.redAccent));
     }
   }
   Future<void> _stopAll() async {
@@ -248,17 +256,14 @@ class _HomeState extends State<Home> {
 
   @override
   Widget build(BuildContext context) {
-    final dns1 = _peer["DNS1"] ?? "-";
-    final dns2 = _peer["DNS2"] ?? "-";
-
     // 8. 将日志列表合并为一个字符串
     final logText = _logLines.join('\n');
 
     return Scaffold(
       appBar: AppBar(
-          title: const Text("PPPoE Controller"),
-          actions: [
-            IconButton(
+        title: const Text("PPPoE Controller"),
+        actions: [
+          IconButton(
             icon: const Icon(Icons.history),
             tooltip: "View Log History",
             onPressed: () {
@@ -269,7 +274,7 @@ class _HomeState extends State<Home> {
               );
             },
           ),
-          ],
+        ],
       ),
 
       body: Padding(
@@ -285,7 +290,7 @@ class _HomeState extends State<Home> {
               // 使用 Flexible 允许下拉菜单在需要时收缩
               Flexible(
                 child: DropdownButtonFormField<String?>(
-                  value: _selectedInterface,
+                  initialValue: _selectedInterface,
                   hint: const Text("自动选择接口"),
                   disabledHint: _isLoadingInterfaces ? const Text("正在加载...") : null,
                   decoration: const InputDecoration(labelText: "网络接口"),
@@ -334,31 +339,63 @@ class _HomeState extends State<Home> {
                 _saveDnsSettings(); // <-- 切换时触发保存
               },
               dense: true,
+              contentPadding: EdgeInsets.zero, // <-- MODIFIED: 减少填充
             ),
+            // <-- MODIFIED: 重新组织按钮以符合 Nothing 风格 -->
             Wrap(
-              spacing: 8.0, // 水平间距 (相当于 SizedBox(width: 8))
-              runSpacing: 8.0, // 垂直间距 (当换行时)
-              alignment: WrapAlignment.start, // (可选) 对齐方式
-              children: [ // 不再需要 Expanded 或 SizedBox
-                ElevatedButton(onPressed: _applyAndStart, child: const Text("启动拨号 + VPN")),
-                ElevatedButton(onPressed: _stopAll, child: const Text("停止")),
-                ElevatedButton(onPressed: () => PppoeBridge.control("cycle"), child: const Text("切换接口")),
+              spacing: 8.0,
+              runSpacing: 8.0,
+              alignment: WrapAlignment.start,
+              children: [
+                // 1. 主按钮 (白色背景)
                 ElevatedButton(
+                    onPressed: _applyAndStart,
+                    child: const Text("启动拨号 + VPN")
+                ),
+                // 2. 危险/停止按钮 (红色描边)
+                OutlinedButton(
+                  onPressed: _stopAll,
+                  child: const Text("停止"),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: NothingColors.redAccent,
+                    side: BorderSide(color: NothingColors.redAccent),
+                  ),
+                ),
+                // 3. 三级按钮 (纯文字)
+                TextButton(
+                    onPressed: () => PppoeBridge.control("cycle"),
+                    child: const Text("切换接口")
+                ),
+                // 4. 次要/测试按钮 (白色描边)
+                OutlinedButton(
                   onPressed: _testStartVpn,
                   child: const Text("Test VPN"),
-                  style: ElevatedButton.styleFrom(backgroundColor: Colors.orange),
                 ),
               ],
             ),
             const SizedBox(height: 12),
-            const Text("日志："),
+            // <-- MODIFIED: 使用主题中的辅助灰色 -->
+            Text("日志：", style: Theme.of(context).textTheme.labelMedium),
             Container(
               padding: const EdgeInsets.all(8),
               height: 320,
-              decoration: BoxDecoration(border: Border.all(color: Colors.grey)),
+              // <-- MODIFIED: 使用主题中的灰色作为边框 -->
+// --- MODIFIED: 添加圆角和裁剪 ---
+              clipBehavior: Clip.antiAlias, // 1. (重要) 裁剪子视图以防止溢出
+              decoration: BoxDecoration(
+                border: Border.all(color: NothingColors.grey),
+                borderRadius: BorderRadius.circular(kNothingBorderRadius), // 2. 使用主题中的圆角
+              ),
               child: SingleChildScrollView(
-                controller: _logScrollController, // 9. 关联控制器
-                child: Text(logText, style: const TextStyle(fontFamily: "monospace")), // 10. 显示合并后的日志
+                controller: _logScrollController,
+                // <-- MODIFIED: 确保日志文本是白色的 -->
+                child: Text(
+                    logText,
+                    style: const TextStyle(
+                      fontFamily: "monospace",
+                      color: NothingColors.white, // 明确指定为白色
+                    )
+                ),
               ),
             ),
           ],

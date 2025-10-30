@@ -182,4 +182,18 @@ class PppoeBridge {
       return false;
     }
   }
+  // --- MODIFIED: 添加了原生“分享”功能 ---
+  static Future<bool> shareLogAsText({required String text, required String subject}) async {
+    try {
+      // 我们使用 _channel 来保持与 getLogDetails/deleteLogEntry 一致
+      final result = await _channel.invokeMethod<bool>('shareLogAsText', {
+        'text': text,
+        'subject': subject,
+      });
+      return result ?? false; // 如果原生代码返回 null，则默认为 false
+    } catch (e) {
+      print("Error calling shareLogAsText: $e");
+      return false;
+    }
+  }
 }

@@ -26,7 +26,6 @@ pluginManagement {
     }
 }
 
-
 // 4) 统一依赖仓库（避免子模块声明 repositories）
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)

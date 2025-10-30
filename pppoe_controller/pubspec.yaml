@@ -35,6 +35,7 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
   intl: ^0.20.2
+  clipboard: ^2.0.2
 
 dev_dependencies:
   flutter_launcher_icons: ^0.14.4
@@ -59,7 +60,10 @@ flutter_launcher_icons:
   adaptive_icon_background: "#FFFFFF"   # 或者 assets/icon_bg.png（1080×1080）
 # The following section is specific to Flutter packages.
 flutter:
-
+  fonts:
+    - family: VT323
+      fonts:
+        - asset: assets/fonts/VT323-Regular.ttf
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in
   # the material Icons class.
