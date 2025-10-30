@@ -1,33 +1,32 @@
 package com.brill.pppoe_controller
 import com.brill.pppoe_controller.bridge.PppoeBridge
 import com.brill.pppoe_controller.vpn.PppoeVpnService
-import android.content.Context // 添加 Context import
+import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences // <-- MODIFIED: 1. 添加了 SharedPreferences 导入
 import android.net.VpnService
-import io.flutter.embedding.android.FlutterFragmentActivity // 注意：基类改为了 FragmentActivity
+import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
-import io.flutter.plugin.common.EventChannel // 1. 导入 EventChannel
+import io.flutter.plugin.common.EventChannel
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.ActivityResult
-import java.io.BufferedReader // 2. 导入 BufferedReader
+import java.io.BufferedReader
 import java.io.File
-import com.brill.pppoe_controller.db.AppDatabase // Add DB import
-import com.brill.pppoe_controller.db.LogEntry    // Add LogEntry import
-import kotlinx.coroutines.* // Add Coroutine imports
-import java.util.concurrent.CopyOnWriteArrayList
+import com.brill.pppoe_controller.db.AppDatabase
+import com.brill.pppoe_controller.db.LogEntry
+import kotlinx.coroutines.* import java.util.concurrent.CopyOnWriteArrayList
 import android.util.Log
 import com.topjohnwu.superuser.Shell
 
-class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 FragmentActivity
+class MainActivity : FlutterFragmentActivity() {
     private val CHANNEL = "pppoe/bridge"
-    private val LOG_CHANNEL = "pppoe/log_stream" // 3. 新的日志流通道
-    private val db by lazy { AppDatabase.getDatabase(this) } // Lazy init DB
-    private val logBuffer = CopyOnWriteArrayList<String>() // Thread-safe buffer for current attempt
+    private val LOG_CHANNEL = "pppoe/log_stream"
+    private val db by lazy { AppDatabase.getDatabase(this) }
+    private val logBuffer = CopyOnWriteArrayList<String>()
     private var isCapturingLog = false
-    private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob()) // Scope for DB operations
-    private var monitoringJob: Job? = null // Job for monitoring dial attempt
-    // --- VPN 权限 ---
+    private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var monitoringJob: Job? = null
     private val mainScope = CoroutineScope(Dispatchers.Main)
     private var flutterResult: MethodChannel.Result? = null
     private val vpnPermissionLauncher = registerForActivityResult(
@@ -41,44 +40,42 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
         this.flutterResult = null
     }
 
-    // --- 日志流 ---
     private var logStreamProcess: Process? = null
     private var logStreamReader: BufferedReader? = null
+
+    // --- Prefs Constants ---
     private val PREFS_NAME = "pppoe_settings"
     private val KEY_CUSTOM_DNS_ENABLED = "use_custom_dns"
     private val KEY_CUSTOM_DNS1 = "custom_dns1"
     private val KEY_CUSTOM_DNS2 = "custom_dns2"
-    // 4. 定义 EventChannel StreamHandler
+    // --- MODIFIED: 2. 添加了新的 Key ---
+    private val KEY_SPEED_TEST_URL = "speedTestUrl"
+    // ---
+
     private val logStreamHandler = object : EventChannel.StreamHandler {
         override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
             if (events == null) return
 
-            // 切换到后台线程来运行 'tail -F'
             Thread {
                 try {
                     val logFile = File("/data/local/tmp/pppoe.log")
                     if (!logFile.exists()) {
-                        logFile.createNewFile() // 确保文件存在
+                        logFile.createNewFile()
                     }
 
-                    // 运行 'tail -F' 命令。我们不需要 root，因为 /data/local/tmp 是可读的
                     logStreamProcess = ProcessBuilder("tail", "-F", logFile.absolutePath)
-                        .redirectErrorStream(true) // 合并 stdout/stderr
+                        .redirectErrorStream(true)
                         .start()
 
                     logStreamReader = logStreamProcess?.inputStream?.bufferedReader()
 
-                    // 逐行读取并发送
                     logStreamReader?.forEachLine { line ->
                         if (line.isNotBlank()) {
                             this@MainActivity.runOnUiThread {
-                                // Always send to live stream
                                 events.success(line)
-                                // If capturing, also add to buffer
                                 if (isCapturingLog) {
                                     logBuffer.add(line)
-                                    // Optional: Limit buffer size to prevent memory issues
-                                    if (logBuffer.size > 1000) { // Keep last 1000 lines
+                                    if (logBuffer.size > 1000) {
                                         logBuffer.removeFirstOrNull()
                                     }
                                 }
@@ -90,19 +87,17 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
                         events.error("LOG_STREAM_ERROR", e.message, null)
                     }
                 } finally {
-                    // 确保在流结束时清理
                     onCancel(null)
                 }
             }.start()
         }
 
         override fun onCancel(arguments: Any?) {
-            // 当 Flutter 停止监听时，关闭进程
             try {
                 logStreamReader?.close()
                 logStreamProcess?.destroy()
             } catch (e: Exception) {
-                // 忽略清理错误
+                // 忽略
             }
             logStreamReader = null
             logStreamProcess = null
@@ -110,70 +105,57 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
     }
 
     private fun startDialingAndCaptureLog(flutterResult: MethodChannel.Result) {
-        monitoringJob?.cancel() // Cancel previous monitoring if any
+        monitoringJob?.cancel()
         logBuffer.clear()
         isCapturingLog = true
         val startTime = System.currentTimeMillis()
-        var finalStatus = "Unknown" // Default status
-        var savedLogId: Long? = null // 用于保存日志 ID
+        var finalStatus = "Unknown"
+        var savedLogId: Long? = null
         Log.d("MainActivity", "Starting dialing attempt and log capture.")
 
-        // Initiate the 'start' command in background
         Thread {
             val startSuccess = PppoeBridge.control("start")
             if (!startSuccess) {
                 Log.e("MainActivity", "PppoeBridge.control('start') failed immediately.")
-                isCapturingLog = false // Stop capturing early
+                isCapturingLog = false
                 finalStatus = "Failure (Control)"
-                // Save attempt immediately
                 coroutineScope.launch {
-                    saveLogAttempt(startTime, finalStatus) // Call suspend fun from coroutine
+                    saveLogAttempt(startTime, finalStatus)
                 }
                 this@MainActivity.runOnUiThread {
                     flutterResult.error("START_FAILED", "Failed to send start command", null)
                 }
-                return@Thread // Exit this thread
+                return@Thread
             }
 
-            // Start monitoring in a coroutine
             monitoringJob = coroutineScope.launch {
-                var connectionUp = false // 改用 connectionUp 变量
-                // 监控最多 15 秒 (可以调整超时)
-                // 注意：ping -W 1 大约需要 1 秒，加上 delay(500)，每次检查约 1.5 秒
-                for (i in 0 until 10) { // 减少循环次数以适应 ping 的耗时 (10 * 1.5s = 15s)
+                var connectionUp = false
+                for (i in 0 until 10) {
                     try {
-                        // --- 修改：调用 ping 检查 ---
-                        // readPeerEnv() 不再需要在这里调用
-                        val pingSuccess = PppoeBridge.checkConnectivity() // 在 IO Coroutine Context 中运行 ping
-                        // --- 修改结束 ---
+                        val pingSuccess = PppoeBridge.checkConnectivity()
 
                         if (pingSuccess) {
                             Log.d("MainActivity", "Ping check successful.")
                             connectionUp = true
-                            finalStatus = "Success (Ping)" // 更新成功状态
-                            break // 成功，退出循环
+                            finalStatus = "Success (Ping)"
+                            break
                         } else {
                             Log.d("MainActivity", "Ping check failed, attempt ${i + 1}/10.")
                         }
                     } catch (e: Exception) {
                         Log.e("MainActivity", "Error during connectivity check", e)
-                        // 可以选择在这里中断，或者继续尝试
                     }
-                    delay(500) // 每次 ping 之后稍微等待一下再重试
+                    delay(500)
                 }
 
-                // 根据 connectionUp 的最终结果判断状态
-                if (!connectionUp && isActive) { // 检查 isActive 确保 job 未被取消
+                if (!connectionUp && isActive) {
                     Log.w("MainActivity", "Connectivity check timed out after ~15 seconds.")
-                    finalStatus = "Timeout (Ping)" // 更新超时状态
+                    finalStatus = "Timeout (Ping)"
                 }
-                // 如果 job 被取消或 start 失败，finalStatus 会是 "Unknown" 或 "Failure (Control)"
 
-                // 停止捕获并保存日志 (这部分逻辑不变)
                 isCapturingLog = false
                 savedLogId = saveLogAttempt(startTime, finalStatus)
 
-                // 向 Flutter 返回 Map 结果 (这部分逻辑不变)
                 withContext(Dispatchers.Main) {
                     val resultMap = mapOf(
                         "status" to finalStatus,
@@ -182,18 +164,17 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
                     if (finalStatus.startsWith("Success")) {
                         flutterResult.success(resultMap)
                     } else {
-                        flutterResult.success(resultMap) // 失败/超时也用 success 返回 Map
+                        flutterResult.success(resultMap)
                     }
                 }
             }
 
-            runBlocking { monitoringJob?.join() } // Use runBlocking carefully
+            runBlocking { monitoringJob?.join() }
 
-        }.start() // Start the thread that runs control("start") and manages monitoring
+        }.start()
     }
 
-    // 返回插入的 ID (Long)，如果失败则返回 null
-    private suspend fun saveLogAttempt(startTime: Long, status: String): Long? { // 修改返回类型
+    private suspend fun saveLogAttempt(startTime: Long, status: String): Long? {
         val capturedLog = logBuffer.joinToString("\n")
         logBuffer.clear()
         val entry = LogEntry(
@@ -202,32 +183,30 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
             status = status
         )
         return try {
-            val insertedId = db.logEntryDao().insert(entry) // insert 返回 Long
+            val insertedId = db.logEntryDao().insert(entry)
             Log.d("MainActivity", "Saved log attempt with ID: $insertedId, Status: $status")
-            insertedId // 返回 ID
+            insertedId
         } catch (e: Exception) {
             Log.e("MainActivity", "Failed to save log entry to database", e)
-            null // 保存失败返回 null
+            null
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        monitoringJob?.cancel() // Cancel monitoring if activity is destroyed
-        coroutineScope.cancel() // Cancel the coroutine scope
+        monitoringJob?.cancel()
+        coroutineScope.cancel()
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        // 5. 注册新的 EventChannel
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, LOG_CHANNEL)
             .setStreamHandler(logStreamHandler)
 
-        // 6. 注册你的 MethodChannel (已全部使用后台线程)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
             .setMethodCallHandler { call, result ->
-                Log.d("MainActivity", "MethodChannel received call: ${call.method}") // <-- 日志 A
+                Log.d("MainActivity", "MethodChannel received call: ${call.method}")
                 when (call.method) {
                     "writeCreds" -> {
                         val user = call.argument<String>("user")
@@ -297,7 +276,7 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
                             coroutineScope.launch {
                                 val entry = db.logEntryDao().getById(id)
                                 if (entry != null) {
-                                    entry.status = status // 更新状态
+                                    entry.status = status
                                     db.logEntryDao().update(entry)
                                     Log.d("MainActivity", "Updated log entry $id status to: $status")
                                     withContext(Dispatchers.Main) { result.success(true) }
@@ -308,7 +287,7 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
                         }
                     }
                     "startDialingAttempt" -> {
-                        startDialingAndCaptureLog(result) // Call new function
+                        startDialingAndCaptureLog(result)
                     }
                     "stopVpn" -> {
                         val i = Intent(this, PppoeVpnService::class.java)
@@ -326,19 +305,13 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
                                 return@setMethodCallHandler
                             }
 
-                            // 1. 创建原生的 ACTION_SEND Intent
                             val sendIntent = Intent().apply {
                                 action = Intent.ACTION_SEND
                                 putExtra(Intent.EXTRA_TEXT, text)
                                 putExtra(Intent.EXTRA_SUBJECT, subject)
                                 type = "text/plain"
                             }
-
-                            // 2. 创建一个“选择器”
                             val shareIntent = Intent.createChooser(sendIntent, "Share Log via...")
-
-                            // 3. 启动 Activity (这会自动弹出分享窗口)
-                            //    我们是在 MainActivity 内部，所以可以直接调用 startActivity
                             startActivity(shareIntent)
 
                             result.success(true)
@@ -347,11 +320,9 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
                             result.error("SHARE_ERROR", e.message, e.stackTraceToString())
                         }
                     }
-                    // --- History Methods ---
                     "getLogHistory" -> {
                         coroutineScope.launch {
                             val history = db.logEntryDao().getAllSummaries()
-                            // Convert to Map for Flutter compatibility
                             val historyMapList = history.map {
                                 mapOf("id" to it.id, "timestamp" to it.timestamp, "note" to it.note, "status" to it.status)
                             }
@@ -361,30 +332,25 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
                         }
                     }
                     "startVpn" -> {
-                        Log.d("MainActivity", "[DEBUG] Received 'startVpn' call from Flutter.") // <-- Add Log
+                        Log.d("MainActivity", "[DEBUG] Received 'startVpn' call from Flutter.")
                         val i = Intent(this, PppoeVpnService::class.java)
                             .setAction(PppoeVpnService.ACT_START)
                         startForegroundService(i)
-                        Log.d("MainActivity", "[DEBUG] Called startForegroundService for PppoeVpnService.") // <-- Add Log
+                        Log.d("MainActivity", "[DEBUG] Called startForegroundService for PppoeVpnService.")
                         result.success(true)
                     }
                     "getLogDetails" -> {
-                        // --- 修正类型转换 ---
                         val idAsNumber = call.argument<Number>("id")
                         val id = idAsNumber?.toLong()
-                        // --- 结束修正 ---
 
                         if (id == null) {
                             result.error("INVALID_ARGS", "ID cannot be null", null)
                         } else {
-                            // (确保这里使用您在类中定义的协程作用域，例如 mainScope)
                             mainScope.launch {
-                                // (确保您的 DAO 方法是 suspend fun)
                                 val entry = withContext(Dispatchers.IO) {
                                     db.logEntryDao().getById(id)
                                 }
 
-                                // (在主线程上返回结果)
                                 if (entry != null) {
                                     result.success(mapOf(
                                         "id" to entry.id,
@@ -401,27 +367,22 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
                     }
 
                     "updateLogNote" -> {
-                        // --- 修正类型转换 ---
                         val idAsNumber = call.argument<Number>("id")
                         val id = idAsNumber?.toLong()
-                        // --- 结束修正 ---
-
-                        val note = call.argument<String?>("note") // Allow null note
+                        val note = call.argument<String?>("note")
 
                         if (id == null) {
                             result.error("INVALID_ARGS", "ID cannot be null", null)
                         } else {
-                            // (确保这里使用您在类中定义的协程作用域，例如 mainScope)
                             mainScope.launch {
                                 val success = withContext(Dispatchers.IO) {
-                                    // (确保 DAO 方法是 suspend fun)
                                     val entry = db.logEntryDao().getById(id)
                                     if (entry != null) {
-                                        entry.note = note // 更新 note
+                                        entry.note = note
                                         db.logEntryDao().update(entry)
-                                        true // 更新成功
+                                        true
                                     } else {
-                                        false // 未找到
+                                        false
                                     }
                                 }
 
@@ -443,12 +404,11 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
                         }
                         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
                         prefs.putBoolean(KEY_CUSTOM_DNS_ENABLED, useCustom)
-                        prefs.putString(KEY_CUSTOM_DNS1, dns1?.trim()) // 保存 trim 后的值
+                        prefs.putString(KEY_CUSTOM_DNS1, dns1?.trim())
                         prefs.putString(KEY_CUSTOM_DNS2, dns2?.trim())
-                        prefs.apply() // 异步保存
+                        prefs.apply()
                         result.success(true)
                     }
-                    // --- 新增: 读取 DNS 设置 ---
                     "loadDnsSettings" -> {
                         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                         val settings = mapOf(
@@ -467,15 +427,10 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
                         }
                         mainScope.launch {
                             try {
-                                // 3. 切换到 IO 线程
                                 val rowsDeleted = withContext(Dispatchers.IO) {
-
-                                    // 4. (这是您的修正!)
-                                    //    db (AppDatabase) -> logEntryDao() (获取DAO) -> deleteById(id) (在DAO上操作)
                                     db.logEntryDao().deleteById(id)
-
                                 }
-                                result.success(rowsDeleted > 0) // 如果行数 > 0，则返回 true
+                                result.success(rowsDeleted > 0)
                             } catch (e: Exception) {
                                 result.error(
                                     "DB_ERROR",
@@ -486,45 +441,63 @@ class MainActivity : FlutterFragmentActivity() { // 注意：基类改为了 Fra
                         }
                     }
                     "getNetworkInterfaces" -> {
-                        Log.d("MainActivity", "Handling 'getNetworkInterfaces' call.") // Log B
-                        // Switch to a background thread
+                        Log.d("MainActivity", "Handling 'getNetworkInterfaces' call.")
                         Thread {
                             var interfaces: List<String> = emptyList()
                             try {
-                                // Use RootShell to execute 'ls /sys/class/net'
                                 val command = "ls /sys/class/net"
-                                Log.d("MainActivity", "Executing root command: $command") // Log 1
+                                Log.d("MainActivity", "Executing root command: $command")
 
-                                // We need the output, not just success/fail, so use Shell.cmd(...).toResult()
-                                val result = Shell.cmd(command).exec() // Execute and get result object
+                                val result = Shell.cmd(command).exec()
 
                                 if (result.isSuccess) {
-                                    // result.out contains the list of interface names, one per line
                                     interfaces = result.out
-                                        .filterNotNull()      // Filter out potential null lines
-                                        .filter { it.isNotBlank() } // Filter out empty lines
-                                        .map { it.trim() }     // Trim whitespace
-                                        .sorted()             // Sort alphabetically
-                                    Log.d("MainActivity", "Root command success. Interfaces found: $interfaces") // Log 2
+                                        .filterNotNull()
+                                        .filter { it.isNotBlank() }
+                                        .map { it.trim() }
+                                        .sorted()
+                                    Log.d("MainActivity", "Root command success. Interfaces found: $interfaces")
                                 } else {
-                                    // Log failure if the root command failed
-                                    Log.e("MainActivity", "Root command '$command' failed. Code: ${result.code}, Error: ${result.err.joinToString("\n")}") // Log 3
+                                    Log.e("MainActivity", "Root command '$command' failed. Code: ${result.code}, Error: ${result.err.joinToString("\n")}")
                                     interfaces = emptyList()
                                 }
 
                             } catch (e: Exception) {
-                                // Log any exceptions during the process
-                                Log.e("MainActivity", "Error executing root command for interfaces", e) // Log 4
+                                Log.e("MainActivity", "Error executing root command for interfaces", e)
                                 interfaces = emptyList()
                             } finally {
-                                // Always return the result (even if empty) to the main thread
                                 this@MainActivity.runOnUiThread {
-                                    Log.d("MainActivity", "Returning interface list: $interfaces") // Log 5
+                                    Log.d("MainActivity", "Returning interface list: $interfaces")
                                     result.success(interfaces)
                                 }
                             }
                         }.start()
                     }
+
+                    // --- MODIFIED: 3. 添加了两个新的分支 ---
+                    "saveSpeedTestUrl" -> {
+                        try {
+                            val url = call.argument<String>("url")
+                            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                            prefs.putString(KEY_SPEED_TEST_URL, url).apply() // 使用常量
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("SAVE_ERROR", e.message, e.stackTraceToString())
+                        }
+                    }
+
+                    "loadSpeedTestUrl" -> {
+                        try {
+                            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                            // 提供默认值
+                            val url = prefs.getString(KEY_SPEED_TEST_URL, "https://speed.cloudflare.com/__down?bytes=10000000")
+                            result.success(url)
+                        } catch (e: Exception) {
+                            result.error("LOAD_ERROR", e.message, e.stackTraceToString())
+                        }
+                    }
+                    // --- 结束 MODIFIED ---
+
                     else -> result.notImplemented()
                 }
             }

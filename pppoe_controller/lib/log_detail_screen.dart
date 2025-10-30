@@ -206,7 +206,7 @@ ${detail.logContent}
                     ),
                     child: SelectableText(
                       detail.logContent.isEmpty ? '(No log content captured)' : detail.logContent,
-                      style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                      style: const TextStyle(fontFamily: 'monospace', fontSize: 16),
                     ),
                   ),
                 ],

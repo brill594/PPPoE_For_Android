@@ -196,4 +196,23 @@ class PppoeBridge {
       return false;
     }
   }
+  // 在 PppoeBridge 类的内部，添加这两个方法
+
+  static Future<void> saveSpeedTestUrl(String url) async {
+    try {
+      await _channel.invokeMethod('saveSpeedTestUrl', {'url': url});
+    } catch (e) {
+      print("Error saving speed test URL: $e");
+    }
+  }
+
+  static Future<String?> loadSpeedTestUrl() async {
+    try {
+      return await _channel.invokeMethod<String>('loadSpeedTestUrl');
+    } catch (e) {
+      print("Error loading speed test URL: $e");
+      return null;
+    }
+  }
 }
+

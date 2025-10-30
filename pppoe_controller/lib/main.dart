@@ -1,18 +1,21 @@
 // lib/main.dart
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
-import 'pppoe_bridge.dart';
 import 'history_screen.dart';
-import 'nothing_theme.dart'; // <-- MODIFIED: 导入新主题
+import 'pppoe_bridge.dart';
+import 'nothing_theme.dart';
 
-void main() => runApp(const App());
+void main() {
+  runApp(const App());
+}
 
 class App extends StatelessWidget {
   const App({super.key});
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      theme: getNothingTheme(), // <-- MODIFIED: 应用主题
+      theme: getNothingTheme(),
       home: Home(),
     );
   }
@@ -21,55 +24,73 @@ class App extends StatelessWidget {
 class Home extends StatefulWidget { const Home({super.key}); @override State<Home> createState() => _HomeState(); }
 
 class _HomeState extends State<Home> {
+  // ... (所有旧的 Controller, _logLines, _peer 等变量保持不变) ...
   final _user = TextEditingController();
   final _pass = TextEditingController();
   final _mtu = TextEditingController(text: "1492");
   final _mru = TextEditingController(text: "1492");
   List<String> _availableInterfaces = [];
-  String? _selectedInterface; // null 表示自动 (由脚本选择)
+  String? _selectedInterface;
   bool _isLoadingInterfaces = false;
-  // --- 修正日志 ---
-  final _logScrollController = ScrollController(); // 1. 用于自动滚动
-  final List<String> _logLines = [];               // 2. 用列表保存日志行
-  StreamSubscription? _logSubscription;          // 3. 日志流的订阅
+  final _logScrollController = ScrollController();
+  final List<String> _logLines = [];
+  StreamSubscription? _logSubscription;
   final _customDns1 = TextEditingController();
   final _customDns2 = TextEditingController();
   bool _useCustomDns = false;
-  // --- 状态轮询 ---
   Map _peer = {};
   Timer? _poll;
 
+  // --- MODIFIED: 测速变量 ---
+  bool _isTesting = false;
+  String _downloadRate = '0.0';
+  String _errorMessage = '';
+  // (上传速度已移除)
+
+  // --- MODIFIED: 新增 URL 设置变量 ---
+  String _speedTestUrl = "https://speed.cloudflare.com/__down?bytes=10000000"; // 默认值
+  final _speedTestUrlController = TextEditingController();
+  // ---
+  final _uiUpdateThrottle = Stopwatch();
   @override
   void initState() {
     super.initState();
     _refreshInterfaces();
-    _startPeerPolling();  // 启动 peer env 轮询
-    _listenToLogStream(); // 启动日志流监听
-    _loadDnsSettings(); // <-- 加载设置
+    _startPeerPolling();
+    _listenToLogStream();
+    _loadDnsSettings();
+    _loadSpeedTestUrl(); // <-- MODIFIED: 加载测速 URL
   }
+
+  // --- MODIFIED: 新增加载 URL 的方法 ---
+  Future<void> _loadSpeedTestUrl() async {
+    final url = await PppoeBridge.loadSpeedTestUrl();
+    setState(() {
+      _speedTestUrl = url ?? _speedTestUrl; // 如果未设置，则保留默认值
+      _speedTestUrlController.text = _speedTestUrl;
+    });
+  }
+
+  // ... (您所有的旧函数 _refreshInterfaces, _loadDnsSettings, ..., _stopAll 保持不变) ...
+  // ... (为了简洁，我在这里省略它们) ...
   Future<void> _refreshInterfaces() async {
-    if (_isLoadingInterfaces) return; // 防止重复点击
+    if (_isLoadingInterfaces) return;
 
     setState(() {
       _isLoadingInterfaces = true;
-      // 清空旧列表和选择，显示加载状态
       _availableInterfaces = [];
       _selectedInterface = null;
     });
 
     try {
-      print("Calling PppoeBridge.getNetworkInterfaces..."); // <-- 日志 2
+      print("Calling PppoeBridge.getNetworkInterfaces...");
       final interfaces = await PppoeBridge.getNetworkInterfaces();
-      print("Received interfaces from Native: $interfaces"); // <-- 日志 3
+      print("Received interfaces from Native: $interfaces");
       setState(() {
         _availableInterfaces = interfaces;
-        // (可选) 如果有接口，默认选中第一个
-        // if (interfaces.isNotEmpty) {
-        //   _selectedInterface = interfaces.first;
-        // }
       });
-    } catch (e) { // <-- 添加 catch 块
-      print("Error calling getNetworkInterfaces: $e"); // <-- 日志 4
+    } catch (e) {
+      print("Error calling getNetworkInterfaces: $e");
     }finally {
       setState(() {
         _isLoadingInterfaces = false;
@@ -85,7 +106,6 @@ class _HomeState extends State<Home> {
     });
   }
 
-  // 稍微延迟保存，避免频繁写入 SharedPreferences
   Timer? _saveDnsDebounce;
   void _saveDnsSettings() {
     _saveDnsDebounce?.cancel();
@@ -97,7 +117,6 @@ class _HomeState extends State<Home> {
       );
     });
   }
-  // 轮询 peer env (每秒一次)
   void _startPeerPolling() {
     _poll?.cancel();
     _poll = Timer.periodic(const Duration(seconds: 1), (_) async {
@@ -106,19 +125,16 @@ class _HomeState extends State<Home> {
     });
   }
 
-  // 监听日志流 (实时)
   void _listenToLogStream() {
     _logSubscription?.cancel();
     _logSubscription = PppoeBridge.logStream.listen(
           (newLine) {
-        // 当有新日志行时
         setState(() {
-          _logLines.add(newLine); // 4. 只添加新行
-          if (_logLines.length > 500) { // (可选) 防止列表无限增长
+          _logLines.add(newLine);
+          if (_logLines.length > 500) {
             _logLines.removeAt(0);
           }
         });
-        // 5. 自动滚动到底部
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (_logScrollController.hasClients) {
             _logScrollController.jumpTo(_logScrollController.position.maxScrollExtent);
@@ -126,7 +142,6 @@ class _HomeState extends State<Home> {
         });
       },
       onError: (e) {
-        // (可选) 在日志中显示错误
         setState(() { _logLines.add("!!! 日志流错误: $e"); });
       },
     );
@@ -136,36 +151,34 @@ class _HomeState extends State<Home> {
   @override
   void dispose() {
     _poll?.cancel();
-    _logSubscription?.cancel(); // 6. 清理订阅
-    _logScrollController.dispose(); // 7. 清理控制器
+    _logSubscription?.cancel();
+    _logScrollController.dispose();
     _customDns1.dispose();
     _customDns2.dispose();
     _saveDnsDebounce?.cancel();
+    _speedTestUrlController.dispose(); // <-- MODIFIED: 清理控制器
     super.dispose();
   }
   Future<void> _applyAndStart() async {
     setState(() { _logLines.clear(); });
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Starting dialing attempt...')));
-    int? savedLogId; // 用于保存日志 ID
-    String finalStatusMessage = "Unknown error occurred"; // 默认消息
+    int? savedLogId;
+    String finalStatusMessage = "Unknown error occurred";
 
     try {
-      // 1. 写入配置
       await PppoeBridge.writeCreds(_user.text, _pass.text);
       final ifaceToSend = (_selectedInterface?.trim().isEmpty ?? true) ? null : _selectedInterface!.trim();
       await PppoeBridge.writeIface(ifaceToSend);
       await PppoeBridge.writeMtuMru(int.tryParse(_mtu.text), int.tryParse(_mru.text));
 
-      // 2. 启动拨号并获取结果 (Map)
       final dialResult = await PppoeBridge.startDialingAttempt();
       final initialStatus = dialResult['status'] as String? ?? "Failure (Unknown)";
-      savedLogId = dialResult['logId'] as int?; // 保存 ID
-      finalStatusMessage = initialStatus; // 先用初始状态
+      savedLogId = dialResult['logId'] as int?;
+      finalStatusMessage = initialStatus;
 
       print("[DEBUG] Dial result: Status='$initialStatus', LogID=$savedLogId");
 
-      // 3. 检查拨号是否成功
-      if (initialStatus.startsWith("Success")) { // 比如 "Success (DNS)"
+      if (initialStatus.startsWith("Success")) {
         print("[DEBUG] Dialing succeeded. Preparing VPN...");
         final vpnPrepared = await PppoeBridge.prepareVpn();
         print("[DEBUG] prepareVpn returned: $vpnPrepared");
@@ -174,50 +187,43 @@ class _HomeState extends State<Home> {
           print("[DEBUG] VPN prepared. Calling startVpn...");
           await PppoeBridge.startVpn();
           print("[DEBUG] startVpn called.");
-          finalStatusMessage = "Success (VPN Started)"; // 更新最终成功状态
-          // (可选) 更新数据库中的状态
+          finalStatusMessage = "Success (VPN Started)";
           if (savedLogId != null) {
             await PppoeBridge.updateLogStatus(savedLogId, finalStatusMessage);
           }
         } else {
           print("[ERROR] VPN prepareVpn returned false.");
-          finalStatusMessage = "Failure (VPN Permission)"; // 设置失败状态
-          // 更新数据库中的状态
+          finalStatusMessage = "Failure (VPN Permission)";
           if (savedLogId != null) {
             await PppoeBridge.updateLogStatus(savedLogId, finalStatusMessage);
           }
-          throw finalStatusMessage; // 抛出错误以便在 catch 中显示
+          throw finalStatusMessage;
         }
       } else {
-        // 拨号本身就失败了 (Timeout 或 Failure (Control))
         print("[ERROR] Dialing attempt failed with status: $initialStatus");
-        throw finalStatusMessage; // 抛出错误
+        throw finalStatusMessage;
       }
 
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      // <-- MODIFIED: 移除了 Colors.green，使用主题默认的 SnackBar 样式
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(finalStatusMessage)));
 
     } catch (e) {
       print("[ERROR] Exception in _applyAndStart: $e");
       final errorMessage = e.toString();
-      // 如果是已知错误，直接显示，否则显示通用错误
       final displayError = (e is String && e.startsWith("Failure")) ? e : "Error: $errorMessage";
 
-      // 如果我们有 logId 并且状态不是最终失败状态，尝试更新数据库
       if (savedLogId != null && !finalStatusMessage.startsWith("Failure") && !finalStatusMessage.startsWith("Timeout")) {
-        finalStatusMessage = "Failure (Unknown)"; // 设置一个通用的失败状态
+        finalStatusMessage = "Failure (Unknown)";
         await PppoeBridge.updateLogStatus(savedLogId, finalStatusMessage);
       }
 
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      // <-- MODIFIED: 使用主题中的 NothingColors.redAccent
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(displayError), backgroundColor: NothingColors.redAccent));
     }
   }
 
   Future<void> _testStartVpn() async {
-    ScaffoldMessenger.of(context).hideCurrentSnackBar(); // Hide previous messages
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Testing VPN start...')));
 
     try {
@@ -230,14 +236,12 @@ class _HomeState extends State<Home> {
         await PppoeBridge.startVpn();
         print("[DEBUG_TEST] startVpn called.");
         ScaffoldMessenger.of(context).hideCurrentSnackBar();
-        // <-- MODIFIED: 移除了 Colors.green
         ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Test: startVpn command sent successfully.'))
         );
       } else {
         print("[DEBUG_TEST] VPN prepareVpn returned false. Permission likely needed or denied.");
         ScaffoldMessenger.of(context).hideCurrentSnackBar();
-        // <-- MODIFIED: 移除了 Colors.orange
         ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Test: VPN permission needed or denied.'))
         );
@@ -245,7 +249,6 @@ class _HomeState extends State<Home> {
     } catch (e, s) {
       print("[DEBUG_TEST] Exception in _testStartVpn: $e\n$s");
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      // <-- MODIFIED: 使用主题中的 NothingColors.redAccent
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Test Error: $e'), backgroundColor: NothingColors.redAccent));
     }
   }
@@ -254,9 +257,142 @@ class _HomeState extends State<Home> {
     await PppoeBridge.control("stop");
   }
 
+
+  HttpClient? _httpClient;
+// --- MODIFIED: 2. 重写测速逻辑 (添加节流阀) ---
+  Future<void> _startSpeedTest() async {
+    setState(() {
+      _isTesting = true;
+      _errorMessage = '';
+      _downloadRate = '0.0';
+    });
+
+    _httpClient = HttpClient();
+    final stopwatch = Stopwatch()..start(); // 主计时器
+    _uiUpdateThrottle.reset();             // 重置 UI 计时器
+    _uiUpdateThrottle.start();
+    int bytesReceived = 0;
+
+    try {
+      final request = await _httpClient!.getUrl(
+          Uri.parse(_speedTestUrl)
+      );
+      final response = await request.close();
+
+      await for (var chunk in response) {
+        if (!_isTesting) {
+          _httpClient?.close(force: true);
+          break;
+        }
+
+        bytesReceived += chunk.length;
+        final elapsedMs = stopwatch.elapsedMilliseconds;
+
+        // --- 这就是节流阀 ---
+        // 仅当 (A)  elapsedMs > 0
+        // 并且 (B) 距离上次 UI 更新已超过 250 毫秒
+        if (elapsedMs > 0 && _uiUpdateThrottle.elapsedMilliseconds > 250) {
+          final speed = (bytesReceived / (elapsedMs / 1000.0)) / 1048576.0;
+
+          setState(() {
+            _downloadRate = speed.toStringAsFixed(2);
+          });
+
+          _uiUpdateThrottle.reset(); // 重置 UI 计时器
+        }
+      }
+
+      // --- 循环结束 ---
+      stopwatch.stop();
+      _uiUpdateThrottle.stop(); // 停止两个计时器
+      _uiUpdateThrottle.reset();
+
+      if (_isTesting) { // 仅在测试未被取消时执行
+        // --- MODIFIED: 3. 执行最后一次精确的 setState ---
+        // 确保显示最终的精确速度，而不是 250ms 前的速度
+        final elapsedMs = stopwatch.elapsedMilliseconds;
+        if (elapsedMs > 0) {
+          final speed = (bytesReceived / (elapsedMs / 1000.0)) / 1048576.0;
+          setState(() {
+            _downloadRate = speed.toStringAsFixed(2);
+            _isTesting = false; // 标记为测试完成
+          });
+        } else {
+          setState(() { _isTesting = false; });
+        }
+      }
+
+    } catch (e) {
+      setState(() {
+        if (e is FormatException) {
+          _errorMessage = "Test failed: Invalid URL format.";
+        } else {
+          _errorMessage = "Test failed: Check URL or connection.";
+        }
+        print("Speed test error: $e");
+        _isTesting = false;
+      });
+    } finally {
+      _httpClient?.close(force: true);
+      _httpClient = null;
+      if (stopwatch.isRunning) stopwatch.stop();
+      if (_uiUpdateThrottle.isRunning) _uiUpdateThrottle.stop();
+    }
+  }
+
+  void _cancelSpeedTest() {
+    setState(() {
+      _isTesting = false;
+      _errorMessage = "Test canceled.";
+      _downloadRate = '0.0';
+    });
+  }
+
+  // --- MODIFIED: 新增设置弹窗 ---
+  Future<void> _showSpeedTestSettingsDialog() async {
+    // 确保控制器与当前状态同步
+    _speedTestUrlController.text = _speedTestUrl;
+
+    await showDialog(
+        context: context,
+        builder: (context) {
+          return AlertDialog(
+            title: const Text("Speed Test Settings"),
+            content: TextField(
+              controller: _speedTestUrlController,
+              decoration: const InputDecoration(
+                  labelText: "Download Test URL",
+                  hintText: "https://... (e.g., 10MB file)"
+              ),
+            ),
+            actions: [
+              TextButton(
+                child: const Text("Cancel"),
+                onPressed: () => Navigator.pop(context),
+              ),
+              ElevatedButton(
+                child: const Text("Save"),
+                onPressed: () {
+                  final newUrl = _speedTestUrlController.text.trim();
+                  setState(() {
+                    _speedTestUrl = newUrl; // 立即更新 UI
+                  });
+                  PppoeBridge.saveSpeedTestUrl(newUrl); // 异步保存
+                  Navigator.pop(context);
+                },
+              ),
+            ],
+          );
+        }
+    );
+  }
+
+
   @override
   Widget build(BuildContext context) {
-    // 8. 将日志列表合并为一个字符串
+    // ... (build 方法的上半部分不变) ...
+    final dns1 = _peer["DNS1"] ?? "-";
+    final dns2 = _peer["DNS2"] ?? "-";
     final logText = _logLines.join('\n');
 
     return Scaffold(
@@ -267,7 +403,6 @@ class _HomeState extends State<Home> {
             icon: const Icon(Icons.history),
             tooltip: "View Log History",
             onPressed: () {
-              // Navigate to the new HistoryScreen
               Navigator.push(
                 context,
                 MaterialPageRoute(builder: (context) => const HistoryScreen()),
@@ -281,16 +416,16 @@ class _HomeState extends State<Home> {
         padding: const EdgeInsets.all(12),
         child: ListView(
           children: [
+            // ... (所有旧的 Row/SwitchListTile/Wrap 保持不变) ...
             Row(children: [
               Expanded(child: TextField(controller: _user, decoration: const InputDecoration(labelText: "PPPoE 用户名"))),
               const SizedBox(width: 12),
               Expanded(child: TextField(controller: _pass, decoration: const InputDecoration(labelText: "密码"), obscureText: true)),
             ]),
             Row(children: [
-              // 使用 Flexible 允许下拉菜单在需要时收缩
               Flexible(
                 child: DropdownButtonFormField<String?>(
-                  initialValue: _selectedInterface,
+                  value: _selectedInterface,
                   hint: const Text("自动选择接口"),
                   disabledHint: _isLoadingInterfaces ? const Text("正在加载...") : null,
                   decoration: const InputDecoration(labelText: "网络接口"),
@@ -306,7 +441,6 @@ class _HomeState extends State<Home> {
                 ),
               ),
               const SizedBox(width: 8),
-              // 刷新按钮
               IconButton(
                 icon: const Icon(Icons.refresh),
                 onPressed: _isLoadingInterfaces ? null : _refreshInterfaces,
@@ -318,17 +452,16 @@ class _HomeState extends State<Home> {
                 controller: _customDns1,
                 decoration: const InputDecoration(labelText: "自定义 DNS 1 (可选)"),
                 keyboardType: TextInputType.numberWithOptions(decimal: true),
-                onChanged: (_) => _saveDnsSettings(), // <-- 输入时触发保存
+                onChanged: (_) => _saveDnsSettings(),
               )),
               const SizedBox(width: 12),
               Expanded(child: TextField(
                 controller: _customDns2,
                 decoration: const InputDecoration(labelText: "自定义 DNS 2 (可选)"),
                 keyboardType: TextInputType.numberWithOptions(decimal: true),
-                onChanged: (_) => _saveDnsSettings(), // <-- 输入时触发保存
+                onChanged: (_) => _saveDnsSettings(),
               )),
             ]),
-            // --- 修改 SwitchListTile ---
             SwitchListTile(
               title: const Text("使用自定义 DNS"),
               value: _useCustomDns,
@@ -336,64 +469,130 @@ class _HomeState extends State<Home> {
                 setState(() {
                   _useCustomDns = value;
                 });
-                _saveDnsSettings(); // <-- 切换时触发保存
+                _saveDnsSettings();
               },
               dense: true,
-              contentPadding: EdgeInsets.zero, // <-- MODIFIED: 减少填充
+              contentPadding: EdgeInsets.zero,
             ),
-            // <-- MODIFIED: 重新组织按钮以符合 Nothing 风格 -->
             Wrap(
               spacing: 8.0,
               runSpacing: 8.0,
               alignment: WrapAlignment.start,
               children: [
-                // 1. 主按钮 (白色背景)
                 ElevatedButton(
                     onPressed: _applyAndStart,
                     child: const Text("启动拨号 + VPN")
                 ),
-                // 2. 危险/停止按钮 (红色描边)
                 OutlinedButton(
                   onPressed: _stopAll,
                   child: const Text("停止"),
                   style: OutlinedButton.styleFrom(
-                    foregroundColor: NothingColors.redAccent,
+                    backgroundColor: NothingColors.redAccent,
+                    foregroundColor: NothingColors.white,
                     side: BorderSide(color: NothingColors.redAccent),
                   ),
                 ),
-                // 3. 三级按钮 (纯文字)
                 TextButton(
                     onPressed: () => PppoeBridge.control("cycle"),
                     child: const Text("切换接口")
                 ),
-                // 4. 次要/测试按钮 (白色描边)
                 OutlinedButton(
                   onPressed: _testStartVpn,
                   child: const Text("Test VPN"),
+                  style: OutlinedButton.styleFrom(
+                    backgroundColor: NothingColors.white,    // White background
+                    foregroundColor: NothingColors.black,    // Black text
+                  ),
                 ),
               ],
             ),
+
+            // --- MODIFIED: 7. 重构测速 UI ---
+            const SizedBox(height: 16),
+            Card(
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(kNothingBorderRadius),
+                  side: BorderSide(color: NothingColors.grey)
+              ),
+              clipBehavior: Clip.antiAlias,
+              // 使用 Stack 来添加齿轮按钮
+              child: Stack(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      children: [
+                        // 结果显示 (居中)
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center, // <-- 居中
+                          children: [
+                            _buildSpeedStat(Icons.arrow_downward, '下载', _downloadRate),
+                            // (上传已移除)
+                          ],
+                        ),
+                        const SizedBox(height: 16),
+
+                        if (_isTesting)
+                          OutlinedButton(
+                            onPressed: _cancelSpeedTest,
+                            child: const Text("取消测试"),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: NothingColors.redAccent,
+                              side: BorderSide(color: NothingColors.redAccent),
+                            ),
+                          )
+                        else
+                          ElevatedButton(
+                            onPressed: _startSpeedTest,
+                            child: const Text("开始下载测试"),
+                          ),
+
+                        if (_errorMessage.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 8.0),
+                            child: Text(
+                              _errorMessage,
+                              style: const TextStyle(color: NothingColors.redAccent),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+
+                  // --- MODIFIED: 8. 添加齿轮按钮 ---
+                  Positioned(
+                    bottom: 4,
+                    right: 4,
+                    child: IconButton(
+                      icon: const Icon(Icons.settings_outlined, size: 20),
+                      color: NothingColors.grey,
+                      tooltip: "Speed Test Settings",
+                      onPressed: _showSpeedTestSettingsDialog,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            // ---
+
+            // ... (日志 Container 保持不变) ...
             const SizedBox(height: 12),
-            // <-- MODIFIED: 使用主题中的辅助灰色 -->
             Text("日志：", style: Theme.of(context).textTheme.labelMedium),
             Container(
               padding: const EdgeInsets.all(8),
               height: 320,
-              // <-- MODIFIED: 使用主题中的灰色作为边框 -->
-// --- MODIFIED: 添加圆角和裁剪 ---
-              clipBehavior: Clip.antiAlias, // 1. (重要) 裁剪子视图以防止溢出
+              clipBehavior: Clip.antiAlias,
               decoration: BoxDecoration(
                 border: Border.all(color: NothingColors.grey),
-                borderRadius: BorderRadius.circular(kNothingBorderRadius), // 2. 使用主题中的圆角
+                borderRadius: BorderRadius.circular(kNothingBorderRadius),
               ),
               child: SingleChildScrollView(
                 controller: _logScrollController,
-                // <-- MODIFIED: 确保日志文本是白色的 -->
                 child: Text(
                     logText,
                     style: const TextStyle(
                       fontFamily: "monospace",
-                      color: NothingColors.white, // 明确指定为白色
+                      color: NothingColors.white,
                     )
                 ),
               ),
@@ -401,6 +600,31 @@ class _HomeState extends State<Home> {
           ],
         ),
       ),
+    );
+  }
+
+  // --- MODIFIED: 9. 更改单位为 MB/s ---
+  Widget _buildSpeedStat(IconData icon, String title, String value) {
+    return Column(
+      children: [
+        Row(
+          children: [
+            Icon(icon, color: NothingColors.grey, size: 16),
+            const SizedBox(width: 4),
+            Text(title, style: const TextStyle(color: NothingColors.grey)),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(
+          value,
+          style: const TextStyle(
+            fontSize: 34,
+            fontWeight: FontWeight.bold,
+            color: NothingColors.white,
+          ),
+        ),
+        const Text("MB/s", style: TextStyle(color: NothingColors.grey)), // <-- 更改单位
+      ],
     );
   }
 }

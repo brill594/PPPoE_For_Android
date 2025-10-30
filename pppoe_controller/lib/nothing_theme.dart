@@ -48,7 +48,7 @@ ThemeData getNothingTheme() {
         elevation: 0,
         titleTextStyle: TextStyle(
           fontFamily: kNothingFontFamily,
-          fontSize: 22,
+          fontSize: 28,
           fontWeight: FontWeight.bold,
           color: NothingColors.white,
         ),
