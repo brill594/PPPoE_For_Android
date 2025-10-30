@@ -6,7 +6,7 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import com.brill.pppoe_controller.bridge.PppoeBridge
 import android.util.Log
-import android.content.Context // 添加 Context import
+import android.content.Context
 import android.util.Patterns
 
 class PppoeVpnService : VpnService() {
@@ -24,7 +24,7 @@ class PppoeVpnService : VpnService() {
     private val KEY_CUSTOM_DNS2 = "custom_dns2"
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d("PppoeVpnService", "[DEBUG] onStartCommand received action: ${intent?.action}") // <-- Add Log
+        Log.d("PppoeVpnService", "[DEBUG] onStartCommand received action: ${intent?.action}")
         when (intent?.action) {
             ACT_START -> startVpn()
             ACT_STOP  -> stopVpn()
@@ -33,7 +33,7 @@ class PppoeVpnService : VpnService() {
     }
 
     private fun startVpn() {
-        Log.d("PppoeVpnService", "[DEBUG] startVpn() called.") // <-- Add Log
+        Log.d("PppoeVpnService", "[DEBUG] startVpn() called.")
         createNotification()
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val useCustomDns = prefs.getBoolean(KEY_CUSTOM_DNS_ENABLED, false)
@@ -43,7 +43,7 @@ class PppoeVpnService : VpnService() {
         val builder = Builder()
             .setSession("PPPoE-DNS-Container")
             .addAddress("10.0.0.1", 32)
-            .addRoute("203.0.113.0", 24) // dummy route: 不黑洞真实流量
+            .addRoute("203.0.113.0", 24)
             .setBlocking(false)
             .setMetered(false)
             .allowBypass()
@@ -51,12 +51,10 @@ class PppoeVpnService : VpnService() {
         if (!customDns1.isNullOrBlank()) builder.addDnsServer(customDns1)
         if (!customDns2.isNullOrBlank()) builder.addDnsServer(customDns2)
 
-        // 可选：添加用户定义的 split routes（例如只为某些私网段声明）
-        // routes.forEach { (cidr, prefix) -> builder.addRoute(cidr, prefix) }
-        var dnsApplied = false
-        var dnsStatusText = "DNS: Default (PPPoE)" // 默认通知文本
 
-        // 1. 尝试使用自定义 DNS
+        var dnsApplied = false
+        var dnsStatusText = "DNS: Default (PPPoE)"
+
         if (useCustomDns && customDns1 != null) {
             Log.d("PppoeVpnService", "Applying custom DNS: $customDns1, $customDns2")
             builder.addDnsServer(customDns1)
@@ -67,16 +65,15 @@ class PppoeVpnService : VpnService() {
             dnsStatusText = "DNS: Custom ($customDns1${if (customDns2 != null) ", $customDns2" else ""})"
         }
 
-        // 2. 如果自定义 DNS 未启用或无效，则回退到 PPPoE 提供的 DNS
         if (!dnsApplied) {
-            val peer = PppoeBridge.readPeerEnv() // 这个调用是阻塞的，最好也移到后台线程，但暂时简化处理
+            val peer = PppoeBridge.readPeerEnv()
             val peerDns1 = peer["DNS1"]?.takeIf { Patterns.IP_ADDRESS.matcher(it).matches() }
             val peerDns2 = peer["DNS2"]?.takeIf { Patterns.IP_ADDRESS.matcher(it).matches() }
 
             Log.d("PppoeVpnService", "Applying PPPoE DNS: $peerDns1, $peerDns2")
             if (peerDns1 != null) {
                 builder.addDnsServer(peerDns1)
-                dnsApplied = true // 至少应用了一个
+                dnsApplied = true
             }
             if (peerDns2 != null) {
                 builder.addDnsServer(peerDns2)
@@ -85,7 +82,6 @@ class PppoeVpnService : VpnService() {
             dnsStatusText = "DNS: PPPoE (${peerDns1 ?: "-"}, ${peerDns2 ?: "-"})"
         }
 
-        // 3. 如果两者都失败，可以添加一个最终的公共 DNS 作为后备 (可选)
         if (!dnsApplied) {
             Log.w("PppoeVpnService", "No valid DNS found from custom or PPPoE, adding fallback DNS 8.8.8.8")
             builder.addDnsServer("8.8.8.8") // 例如 Google DNS
@@ -98,14 +94,13 @@ class PppoeVpnService : VpnService() {
             stopVpn()
             return
         }
-        // 更新通知以显示应用的 DNS
         startForeground(NOTI_ID, notification(dnsStatusText))
     }
 
     private fun stopVpn() {
         tun?.close()
         tun = null
-        stopForeground(STOP_FOREGROUND_REMOVE)  // <-- 推荐
+        stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 

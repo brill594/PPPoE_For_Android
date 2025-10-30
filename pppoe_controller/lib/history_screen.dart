@@ -1,4 +1,3 @@
-// lib/history_screen.dart
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'pppoe_bridge.dart';
@@ -85,10 +84,8 @@ class _HistoryScreenState extends State<HistoryScreen> {
             final formattedDate = DateFormat('yyyy-MM-dd HH:mm:ss').format(dateTime);
 
             return Dismissible(
-              key: Key(entry.id.toString()), // Key 必须唯一
+              key: Key(entry.id.toString()),
               direction: DismissDirection.endToStart,
-
-              // --- MODIFIED: 移除了 confirmDismiss 对话框 ---
 
               // onDismissed 会在滑动动画完成后立即触发
               onDismissed: (direction) {

@@ -6,13 +6,10 @@ object PppoeBridge {
     private const val DIR = "/data/local/tmp"
     private fun f(name: String) = "$DIR/$name"
     fun checkConnectivity(): Boolean {
-        // -c 1: 只发送一个包
-        // -W 1: 等待回复最多 1 秒
-        // 1.1.1.1: Cloudflare DNS (也可以用 8.8.8.8 或其他可靠 IP)
-        // RootShell.run() 返回 true 如果命令退出码为 0 (ping 通)
-        Log.d("PppoeBridge", "Attempting ping check...") // 添加日志
+
+        Log.d("PppoeBridge", "Attempting ping check...")
         val success = RootShell.run("ping -c 1 -W 1 1.1.1.1") or RootShell.run("ping -c 1 -W 1 8.8.4.4")
-        Log.d("PppoeBridge", "Ping check result: $success") // 添加日志
+        Log.d("PppoeBridge", "Ping check result: $success")
         return success
     }
     fun writeCreds(user: String, pass: String): Boolean {
@@ -37,10 +34,7 @@ object PppoeBridge {
     }
 
     fun control(cmd: String): Boolean {
-        // e.g. "start" / "stop" / "cycle" / "switch eth0"
-        // 使用 echo 并确保对命令中的特殊字符进行转义 (虽然 start/stop/cycle 通常不需要)
-        // 注意：简单的 echo 可能不足以处理复杂的 cmd，但对于 start/stop/cycle 足够
-        val escapedCmd = cmd.replace("'", "'\\''") // 基本的单引号转义
+        val escapedCmd = cmd.replace("'", "'\\''")
         return RootShell.run("echo '$escapedCmd' > ${f("pppoe_control")}")
     }
 

@@ -40,18 +40,14 @@ class LogDetail extends LogSummary {
 }
 
 class PppoeBridge {
-  static const _ch = MethodChannel('pppoe/bridge');
   static const _channel = MethodChannel('pppoe/bridge');
-  // 1. 添加新的 EventChannel
   static const _logChannel = EventChannel('pppoe/log_stream');
 
-  // 2. 创建一个 getter 来暴露日志流
   static Stream<String> get logStream {
     return _logChannel.receiveBroadcastStream().map((event) => event as String);
   }
 
-  // --- Replaced startVpn with this ---
-// 返回包含状态和日志 ID 的 Map
+  // 返回包含状态和日志 ID 的 Map
   static Future<Map<String, dynamic>> startDialingAttempt() async {
     try {
       final result = await _channel.invokeMethod('startDialingAttempt');
@@ -105,43 +101,43 @@ class PppoeBridge {
     }
   }
   static Future<bool> writeCreds(String user, String pass) async {
-    final ok = await _ch.invokeMethod<bool>('writeCreds', {'user': user, 'pass': pass});
+    final ok = await _channel.invokeMethod<bool>('writeCreds', {'user': user, 'pass': pass});
     return ok ?? false;
   }
 
   static Future<bool> writeIface(String? iface) async {
-    final ok = await _ch.invokeMethod<bool>('writeIface', {'iface': iface});
+    final ok = await _channel.invokeMethod<bool>('writeIface', {'iface': iface});
     return ok ?? false;
   }
 
   static Future<bool> writeMtuMru(int? mtu, int? mru) async {
-    final ok = await _ch.invokeMethod<bool>('writeMtuMru', {'mtu': mtu, 'mru': mru});
+    final ok = await _channel.invokeMethod<bool>('writeMtuMru', {'mtu': mtu, 'mru': mru});
     return ok ?? false;
   }
 
   static Future<bool> control(String cmd) async {
-    final ok = await _ch.invokeMethod<bool>('control', {'cmd': cmd});
+    final ok = await _channel.invokeMethod<bool>('control', {'cmd': cmd});
     return ok ?? false;
   }
 
   static Future<Map<String, String>> readPeerEnv() async {
     // 用 invokeMapMethod 直接拿到强类型 Map
-    final m = await _ch.invokeMapMethod<String, String>('readPeerEnv');
+    final m = await _channel.invokeMapMethod<String, String>('readPeerEnv');
     return m ?? <String, String>{};
   }
 
   static Future<bool> prepareVpn() async {
-    final ok = await _ch.invokeMethod<bool>('prepareVpn');
+    final ok = await _channel.invokeMethod<bool>('prepareVpn');
     return ok ?? false;
   }
 
   static Future<bool> startVpn() async {
-    final ok = await _ch.invokeMethod<bool>('startVpn');
+    final ok = await _channel.invokeMethod<bool>('startVpn');
     return ok ?? false;
   }
 
   static Future<bool> stopVpn() async {
-    final ok = await _ch.invokeMethod<bool>('stopVpn');
+    final ok = await _channel.invokeMethod<bool>('stopVpn');
     return ok ?? false;
   }
 
@@ -182,10 +178,9 @@ class PppoeBridge {
       return false;
     }
   }
-  // --- MODIFIED: 添加了原生“分享”功能 ---
+
   static Future<bool> shareLogAsText({required String text, required String subject}) async {
     try {
-      // 我们使用 _channel 来保持与 getLogDetails/deleteLogEntry 一致
       final result = await _channel.invokeMethod<bool>('shareLogAsText', {
         'text': text,
         'subject': subject,
@@ -196,7 +191,6 @@ class PppoeBridge {
       return false;
     }
   }
-  // 在 PppoeBridge 类的内部，添加这两个方法
 
   static Future<void> saveSpeedTestUrl(String url) async {
     try {
@@ -215,4 +209,3 @@ class PppoeBridge {
     }
   }
 }
-

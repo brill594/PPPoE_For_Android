@@ -1,6 +1,5 @@
-// lib/log_detail_screen.dart
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart'; // (保留，为了“复制”功能)
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'pppoe_bridge.dart';
 import 'nothing_theme.dart';
@@ -14,7 +13,6 @@ class LogDetailScreen extends StatefulWidget {
 }
 
 class _LogDetailScreenState extends State<LogDetailScreen> {
-  // ... (所有变量和 initState/dispose/loadDetails/saveNote/deleteEntry 保持不变) ...
   LogDetail? _logDetail;
   bool _isLoading = true;
   String? _error;
@@ -114,11 +112,9 @@ class _LogDetailScreenState extends State<LogDetailScreen> {
     }
   }
 
-  // --- MODIFIED: (重要) 这就是新的导出功能 ---
   Future<void> _shareLogNatively() async {
     if (_logDetail == null) return;
 
-    // 1. 准备内容 (和以前一样)
     final detail = _logDetail!;
     final dateTime = DateTime.fromMillisecondsSinceEpoch(detail.timestamp);
     final formattedDate = DateFormat('yyyy-MM-dd_HH-mm-ss').format(dateTime);
@@ -152,7 +148,6 @@ ${detail.logContent}
 
   @override
   Widget build(BuildContext context) {
-    // ... (Build 方法的 if/else 逻辑不变) ...
     Widget body;
     String title = 'Log Details';
 
@@ -231,14 +226,12 @@ ${detail.logContent}
       appBar: AppBar(
         title: Text(title),
         actions: [
-          // --- MODIFIED: “导出”按钮现在调用 _shareLogNatively ---
           if (_logDetail != null)
             IconButton(
               icon: const Icon(Icons.ios_share_outlined),
-              onPressed: _shareLogNatively, // <-- 调用新函数
-              tooltip: 'Share / Export Log', // <-- 更新提示
+              onPressed: _shareLogNatively,
+              tooltip: 'Share / Export Log',
             ),
-          // ---
           if (_logDetail != null)
             IconButton(
               icon: const Icon(Icons.delete_outline, color: NothingColors.redAccent),
@@ -252,7 +245,6 @@ ${detail.logContent}
   }
 }
 
-// (copyWith 扩展保持不变)
 extension LogDetailCopyWith on LogDetail {
   LogDetail copyWith({
     int? id,

@@ -3,7 +3,6 @@ import com.brill.pppoe_controller.bridge.PppoeBridge
 import com.brill.pppoe_controller.vpn.PppoeVpnService
 import android.content.Context
 import android.content.Intent
-import android.content.SharedPreferences // <-- MODIFIED: 1. 添加了 SharedPreferences 导入
 import android.net.VpnService
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -43,14 +42,11 @@ class MainActivity : FlutterFragmentActivity() {
     private var logStreamProcess: Process? = null
     private var logStreamReader: BufferedReader? = null
 
-    // --- Prefs Constants ---
     private val PREFS_NAME = "pppoe_settings"
     private val KEY_CUSTOM_DNS_ENABLED = "use_custom_dns"
     private val KEY_CUSTOM_DNS1 = "custom_dns1"
     private val KEY_CUSTOM_DNS2 = "custom_dns2"
-    // --- MODIFIED: 2. 添加了新的 Key ---
     private val KEY_SPEED_TEST_URL = "speedTestUrl"
-    // ---
 
     private val logStreamHandler = object : EventChannel.StreamHandler {
         override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
@@ -97,7 +93,6 @@ class MainActivity : FlutterFragmentActivity() {
                 logStreamReader?.close()
                 logStreamProcess?.destroy()
             } catch (e: Exception) {
-                // 忽略
             }
             logStreamReader = null
             logStreamProcess = null
@@ -474,7 +469,6 @@ class MainActivity : FlutterFragmentActivity() {
                         }.start()
                     }
 
-                    // --- MODIFIED: 3. 添加了两个新的分支 ---
                     "saveSpeedTestUrl" -> {
                         try {
                             val url = call.argument<String>("url")
@@ -496,7 +490,6 @@ class MainActivity : FlutterFragmentActivity() {
                             result.error("LOAD_ERROR", e.message, e.stackTraceToString())
                         }
                     }
-                    // --- 结束 MODIFIED ---
 
                     else -> result.notImplemented()
                 }

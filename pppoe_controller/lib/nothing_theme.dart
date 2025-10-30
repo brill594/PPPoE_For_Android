@@ -1,14 +1,9 @@
-// lib/nothing_theme.dart
 import 'package:flutter/material.dart';
 
-// 1. (可选) 定义你的字体名称 (与 pubspec.yaml 一致)
-const String? kNothingFontFamily = 'VT323'; // 假设您已添加 'VT323'
+const String? kNothingFontFamily = 'VT323';
 
-// --- MODIFIED: 定义全局圆角 ---
-// 2. 定义全局圆角
-const double kNothingBorderRadius = 24.0; // 从 12.0 增大到 24.0
+const double kNothingBorderRadius = 24.0;
 
-// 3. 定义 Nothing 风格的核心颜色
 class NothingColors {
   static const Color black = Color(0xFF000000);
   static const Color white = Color(0xFFFFFFFF);
@@ -16,7 +11,6 @@ class NothingColors {
   static const Color redAccent = Color(0xFFFF0000); // 唯一的点缀色
 }
 
-// 4. 创建 Nothing 风格的主题
 ThemeData getNothingTheme() {
   return ThemeData(
     // 基础设置
@@ -40,8 +34,6 @@ ThemeData getNothingTheme() {
       ),
 
       // 组件特定主题
-      // ... (AppBar, Icon, Text, InputDecoration... 等保持不变) ...
-
       appBarTheme: AppBarTheme(
         backgroundColor: NothingColors.black,
         foregroundColor: NothingColors.white,
@@ -102,7 +94,6 @@ ThemeData getNothingTheme() {
         style: ElevatedButton.styleFrom(
           backgroundColor: NothingColors.white,
           foregroundColor: NothingColors.black,
-          // --- MODIFIED: 使用更大的全局圆角 ---
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(kNothingBorderRadius)),
           textStyle: TextStyle(fontFamily: kNothingFontFamily, fontWeight: FontWeight.bold),
         ),
@@ -111,7 +102,6 @@ ThemeData getNothingTheme() {
         style: OutlinedButton.styleFrom(
           foregroundColor: NothingColors.white,
           side: BorderSide(color: NothingColors.white),
-          // --- MODIFIED: 使用更大的全局圆角 ---
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(kNothingBorderRadius)),
           textStyle: TextStyle(fontFamily: kNothingFontFamily, fontWeight: FontWeight.bold),
         ),
@@ -119,7 +109,6 @@ ThemeData getNothingTheme() {
       textButtonTheme: TextButtonThemeData(
         style: TextButton.styleFrom(
           foregroundColor: NothingColors.white,
-          // --- MODIFIED: 使用更大的全局圆角 ---
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(kNothingBorderRadius)),
           textStyle: TextStyle(fontFamily: kNothingFontFamily, fontWeight: FontWeight.bold),
         ),

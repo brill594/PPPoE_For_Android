@@ -1,4 +1,3 @@
-// lib/main.dart
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -24,7 +23,6 @@ class App extends StatelessWidget {
 class Home extends StatefulWidget { const Home({super.key}); @override State<Home> createState() => _HomeState(); }
 
 class _HomeState extends State<Home> {
-  // ... (所有旧的 Controller, _logLines, _peer 等变量保持不变) ...
   final _user = TextEditingController();
   final _pass = TextEditingController();
   final _mtu = TextEditingController(text: "1492");
@@ -41,16 +39,12 @@ class _HomeState extends State<Home> {
   Map _peer = {};
   Timer? _poll;
 
-  // --- MODIFIED: 测速变量 ---
   bool _isTesting = false;
   String _downloadRate = '0.0';
   String _errorMessage = '';
-  // (上传速度已移除)
 
-  // --- MODIFIED: 新增 URL 设置变量 ---
-  String _speedTestUrl = "https://speed.cloudflare.com/__down?bytes=10000000"; // 默认值
+  String _speedTestUrl = "https://speed.cloudflare.com/__down?bytes=10000000";
   final _speedTestUrlController = TextEditingController();
-  // ---
   final _uiUpdateThrottle = Stopwatch();
   @override
   void initState() {
@@ -59,10 +53,9 @@ class _HomeState extends State<Home> {
     _startPeerPolling();
     _listenToLogStream();
     _loadDnsSettings();
-    _loadSpeedTestUrl(); // <-- MODIFIED: 加载测速 URL
+    _loadSpeedTestUrl();
   }
 
-  // --- MODIFIED: 新增加载 URL 的方法 ---
   Future<void> _loadSpeedTestUrl() async {
     final url = await PppoeBridge.loadSpeedTestUrl();
     setState(() {
@@ -71,8 +64,6 @@ class _HomeState extends State<Home> {
     });
   }
 
-  // ... (您所有的旧函数 _refreshInterfaces, _loadDnsSettings, ..., _stopAll 保持不变) ...
-  // ... (为了简洁，我在这里省略它们) ...
   Future<void> _refreshInterfaces() async {
     if (_isLoadingInterfaces) return;
 
@@ -156,7 +147,7 @@ class _HomeState extends State<Home> {
     _customDns1.dispose();
     _customDns2.dispose();
     _saveDnsDebounce?.cancel();
-    _speedTestUrlController.dispose(); // <-- MODIFIED: 清理控制器
+    _speedTestUrlController.dispose();
     super.dispose();
   }
   Future<void> _applyAndStart() async {
@@ -259,7 +250,6 @@ class _HomeState extends State<Home> {
 
 
   HttpClient? _httpClient;
-// --- MODIFIED: 2. 重写测速逻辑 (添加节流阀) ---
   Future<void> _startSpeedTest() async {
     setState(() {
       _isTesting = true;
@@ -302,20 +292,18 @@ class _HomeState extends State<Home> {
         }
       }
 
-      // --- 循环结束 ---
       stopwatch.stop();
-      _uiUpdateThrottle.stop(); // 停止两个计时器
+      _uiUpdateThrottle.stop();
       _uiUpdateThrottle.reset();
 
       if (_isTesting) { // 仅在测试未被取消时执行
-        // --- MODIFIED: 3. 执行最后一次精确的 setState ---
         // 确保显示最终的精确速度，而不是 250ms 前的速度
         final elapsedMs = stopwatch.elapsedMilliseconds;
         if (elapsedMs > 0) {
           final speed = (bytesReceived / (elapsedMs / 1000.0)) / 1048576.0;
           setState(() {
             _downloadRate = speed.toStringAsFixed(2);
-            _isTesting = false; // 标记为测试完成
+            _isTesting = false;
           });
         } else {
           setState(() { _isTesting = false; });
@@ -348,7 +336,6 @@ class _HomeState extends State<Home> {
     });
   }
 
-  // --- MODIFIED: 新增设置弹窗 ---
   Future<void> _showSpeedTestSettingsDialog() async {
     // 确保控制器与当前状态同步
     _speedTestUrlController.text = _speedTestUrl;
@@ -390,7 +377,6 @@ class _HomeState extends State<Home> {
 
   @override
   Widget build(BuildContext context) {
-    // ... (build 方法的上半部分不变) ...
     final dns1 = _peer["DNS1"] ?? "-";
     final dns2 = _peer["DNS2"] ?? "-";
     final logText = _logLines.join('\n');
@@ -416,7 +402,6 @@ class _HomeState extends State<Home> {
         padding: const EdgeInsets.all(12),
         child: ListView(
           children: [
-            // ... (所有旧的 Row/SwitchListTile/Wrap 保持不变) ...
             Row(children: [
               Expanded(child: TextField(controller: _user, decoration: const InputDecoration(labelText: "PPPoE 用户名"))),
               const SizedBox(width: 12),
@@ -500,14 +485,13 @@ class _HomeState extends State<Home> {
                   onPressed: _testStartVpn,
                   child: const Text("Test VPN"),
                   style: OutlinedButton.styleFrom(
-                    backgroundColor: NothingColors.white,    // White background
-                    foregroundColor: NothingColors.black,    // Black text
+                    backgroundColor: NothingColors.white,
+                    foregroundColor: NothingColors.black,
                   ),
                 ),
               ],
             ),
 
-            // --- MODIFIED: 7. 重构测速 UI ---
             const SizedBox(height: 16),
             Card(
               shape: RoundedRectangleBorder(
@@ -522,12 +506,10 @@ class _HomeState extends State<Home> {
                     padding: const EdgeInsets.all(16.0),
                     child: Column(
                       children: [
-                        // 结果显示 (居中)
                         Row(
-                          mainAxisAlignment: MainAxisAlignment.center, // <-- 居中
+                          mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             _buildSpeedStat(Icons.arrow_downward, '下载', _downloadRate),
-                            // (上传已移除)
                           ],
                         ),
                         const SizedBox(height: 16),
@@ -559,7 +541,6 @@ class _HomeState extends State<Home> {
                     ),
                   ),
 
-                  // --- MODIFIED: 8. 添加齿轮按钮 ---
                   Positioned(
                     bottom: 4,
                     right: 4,
@@ -573,9 +554,7 @@ class _HomeState extends State<Home> {
                 ],
               ),
             ),
-            // ---
 
-            // ... (日志 Container 保持不变) ...
             const SizedBox(height: 12),
             Text("日志：", style: Theme.of(context).textTheme.labelMedium),
             Container(
@@ -603,7 +582,6 @@ class _HomeState extends State<Home> {
     );
   }
 
-  // --- MODIFIED: 9. 更改单位为 MB/s ---
   Widget _buildSpeedStat(IconData icon, String title, String value) {
     return Column(
       children: [
@@ -623,7 +601,7 @@ class _HomeState extends State<Home> {
             color: NothingColors.white,
           ),
         ),
-        const Text("MB/s", style: TextStyle(color: NothingColors.grey)), // <-- 更改单位
+        const Text("MB/s", style: TextStyle(color: NothingColors.grey)),
       ],
     );
   }
