@@ -1,45 +1,80 @@
 package com.brill.pppoe_controller.vpn
+
 import android.app.*
 import android.content.Intent
 import android.net.VpnService
-import android.os.Build
+import android.os.Bundle
 import android.os.ParcelFileDescriptor
-import com.brill.pppoe_controller.bridge.PppoeBridge
-import android.util.Log
-import android.content.Context
+import android.os.ResultReceiver
 import android.util.Patterns
+import com.brill.pppoe_controller.bridge.PppoeBridge
+import kotlinx.coroutines.*
 
 class PppoeVpnService : VpnService() {
     companion object {
         const val ACT_START = "START_VPN"
-        const val ACT_STOP  = "STOP_VPN"
+        const val EXTRA_RESULT = "result"
         private const val NOTI_CH = "pppoe_vpn"
         private const val NOTI_ID = 101
     }
 
     private var tun: ParcelFileDescriptor? = null
-    private val PREFS_NAME = "pppoe_settings"
-    private val KEY_CUSTOM_DNS_ENABLED = "use_custom_dns"
-    private val KEY_CUSTOM_DNS1 = "custom_dns1"
-    private val KEY_CUSTOM_DNS2 = "custom_dns2"
+    private val scope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
+    private var startJob: Job? = null
+    private var pendingResult: ResultReceiver? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d("PppoeVpnService", "[DEBUG] onStartCommand received action: ${intent?.action}")
-        when (intent?.action) {
-            ACT_START -> startVpn()
-            ACT_STOP  -> stopVpn()
+        if (intent?.action != ACT_START) {
+            stopSelf()
+            return START_NOT_STICKY
         }
-        return START_STICKY
+        @Suppress("DEPRECATION")
+        val receiver = intent.getParcelableExtra<ResultReceiver>(EXTRA_RESULT)
+        if (startJob?.isActive == true) {
+            receiver?.send(0, Bundle().apply { putString("error", "VPN start already pending") })
+            return START_NOT_STICKY
+        }
+        pendingResult = receiver
+        try {
+            val mgr = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            mgr.createNotificationChannel(NotificationChannel(NOTI_CH, "PPPoE VPN", NotificationManager.IMPORTANCE_LOW))
+            startForeground(NOTI_ID, notification("Starting PPPoE DNS container"))
+            startJob = scope.launch {
+                try {
+                    val details = establishVpn()
+                    pendingResult?.send(1, Bundle().apply { putString("details", details) })
+                    pendingResult = null
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    failStart(e)
+                }
+            }
+        } catch (e: Exception) {
+            failStart(e)
+        }
+        return START_NOT_STICKY
     }
 
-    private fun startVpn() {
-        Log.d("PppoeVpnService", "[DEBUG] startVpn() called.")
-        createNotification()
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val useCustomDns = prefs.getBoolean(KEY_CUSTOM_DNS_ENABLED, false)
-        val customDns1 = prefs.getString(KEY_CUSTOM_DNS1, null)?.takeIf { Patterns.IP_ADDRESS.matcher(it).matches() } // 读取并验证 IP
-        val customDns2 = prefs.getString(KEY_CUSTOM_DNS2, null)?.takeIf { Patterns.IP_ADDRESS.matcher(it).matches() } // 读取并验证 IP
+    private fun failStart(e: Exception) {
+        pendingResult?.send(0, Bundle().apply { putString("error", e.message ?: "VPN establishment failed") })
+        pendingResult = null
+        stopSelf()
+    }
 
+    private suspend fun establishVpn(): String {
+        val prefs = getSharedPreferences("pppoe_settings", MODE_PRIVATE)
+        val custom = if (prefs.getBoolean("use_custom_dns", false)) {
+            listOfNotNull(prefs.getString("custom_dns1", null), prefs.getString("custom_dns2", null))
+                .map { it.trim() }.filter { Patterns.IP_ADDRESS.matcher(it).matches() }
+        } else emptyList()
+        val dns = if (custom.isNotEmpty()) custom else {
+            val peer = withContext(Dispatchers.IO) { PppoeBridge.readPeerEnv() }
+            listOfNotNull(peer["DNS1"], peer["DNS2"])
+                .filter { Patterns.IP_ADDRESS.matcher(it).matches() }
+        }
+        val servers = dns.distinct().ifEmpty { listOf("8.8.8.8") }
+        // Routing to PPP is owned by the module; this TUN is only a DNS container.
         val builder = Builder()
             .setSession("PPPoE-DNS-Container")
             .addAddress("10.0.0.1", 32)
@@ -47,68 +82,14 @@ class PppoeVpnService : VpnService() {
             .setBlocking(false)
             .setMetered(false)
             .allowBypass()
-
-        if (!customDns1.isNullOrBlank()) builder.addDnsServer(customDns1)
-        if (!customDns2.isNullOrBlank()) builder.addDnsServer(customDns2)
-
-
-        var dnsApplied = false
-        var dnsStatusText = "DNS: Default (PPPoE)"
-
-        if (useCustomDns && customDns1 != null) {
-            Log.d("PppoeVpnService", "Applying custom DNS: $customDns1, $customDns2")
-            builder.addDnsServer(customDns1)
-            if (customDns2 != null) {
-                builder.addDnsServer(customDns2)
-            }
-            dnsApplied = true
-            dnsStatusText = "DNS: Custom ($customDns1${if (customDns2 != null) ", $customDns2" else ""})"
-        }
-
-        if (!dnsApplied) {
-            val peer = PppoeBridge.readPeerEnv()
-            val peerDns1 = peer["DNS1"]?.takeIf { Patterns.IP_ADDRESS.matcher(it).matches() }
-            val peerDns2 = peer["DNS2"]?.takeIf { Patterns.IP_ADDRESS.matcher(it).matches() }
-
-            Log.d("PppoeVpnService", "Applying PPPoE DNS: $peerDns1, $peerDns2")
-            if (peerDns1 != null) {
-                builder.addDnsServer(peerDns1)
-                dnsApplied = true
-            }
-            if (peerDns2 != null) {
-                builder.addDnsServer(peerDns2)
-                dnsApplied = true
-            }
-            dnsStatusText = "DNS: PPPoE (${peerDns1 ?: "-"}, ${peerDns2 ?: "-"})"
-        }
-
-        if (!dnsApplied) {
-            Log.w("PppoeVpnService", "No valid DNS found from custom or PPPoE, adding fallback DNS 8.8.8.8")
-            builder.addDnsServer("8.8.8.8") // 例如 Google DNS
-            dnsStatusText = "DNS: Fallback (8.8.8.8)"
-        }
-        tun = builder.establish()
-        if (tun == null) {
-            Log.e("PppoeVpnService", "Failed to establish VPN tunnel, likely permission issue.")
-            startForeground(NOTI_ID, notification("VPN Permission Required or Failed"))
-            stopVpn()
-            return
-        }
-        startForeground(NOTI_ID, notification(dnsStatusText))
-    }
-
-    private fun stopVpn() {
-        tun?.close()
-        tun = null
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
-    }
-
-    private fun createNotification() {
-        val mgr = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        if (Build.VERSION.SDK_INT >= 26) {
-            mgr.createNotificationChannel(NotificationChannel(NOTI_CH, "PPPoE VPN", NotificationManager.IMPORTANCE_LOW))
-        }
+        servers.forEach { builder.addDnsServer(it) }
+        val established = checkNotNull(builder.establish()) { "VPN permission was revoked" }
+        val previous = tun
+        tun = established
+        runCatching { previous?.close() }
+        startForeground(NOTI_ID, notification("DNS: ${servers.joinToString(", ")}"))
+        val source = if (custom.isNotEmpty()) "custom" else if (dns.isNotEmpty()) "peer" else "fallback"
+        return "dns_source=$source dns=${servers.joinToString(",")}"
     }
 
     private fun notification(text: String): Notification {
@@ -123,5 +104,15 @@ class PppoeVpnService : VpnService() {
             .build()
     }
 
-    override fun onRevoke() { stopVpn() }
+    override fun onRevoke() { stopSelf() }
+
+    override fun onDestroy() {
+        scope.cancel()
+        pendingResult?.send(0, Bundle().apply { putString("error", "VPN service stopped") })
+        pendingResult = null
+        runCatching { tun?.close() }
+        tun = null
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        super.onDestroy()
+    }
 }

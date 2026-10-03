@@ -1,9 +1,12 @@
 import 'dart:async';
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'history_screen.dart';
 import 'pppoe_bridge.dart';
 import 'nothing_theme.dart';
+import 'speed_test.dart';
+import 'log_diagnostics.dart';
+import 'log_view.dart';
+import 'motion.dart';
 
 void main() {
   runApp(const App());
@@ -15,7 +18,7 @@ class App extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       theme: getNothingTheme(),
-      home: Home(),
+      home: const Home(),
     );
   }
 }
@@ -30,13 +33,12 @@ class _HomeState extends State<Home> {
   List<String> _availableInterfaces = [];
   String? _selectedInterface;
   bool _isLoadingInterfaces = false;
-  final _logScrollController = ScrollController();
-  final List<String> _logLines = [];
+  final _logs = LogBuffer();
   StreamSubscription? _logSubscription;
   final _customDns1 = TextEditingController();
   final _customDns2 = TextEditingController();
   bool _useCustomDns = false;
-  Map _peer = {};
+  Map<String, String> _peer = {};
   Timer? _poll;
 
   bool _isTesting = false;
@@ -45,7 +47,25 @@ class _HomeState extends State<Home> {
 
   String _speedTestUrl = "https://speed.cloudflare.com/__down?bytes=10000000";
   final _speedTestUrlController = TextEditingController();
-  final _uiUpdateThrottle = Stopwatch();
+  SpeedTest? _speedTest;
+  bool _isPolling = false;
+  bool _isOperating = false;
+  bool _isStopping = false;
+  int _operation = 0;
+
+  void _showMessage(String message, {bool error = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text(message),
+        backgroundColor: error ? NothingColors.redAccent : null,
+      ));
+  }
+
+  void _requireSuccess(bool success, String message) {
+    if (!success) throw StateError(message);
+  }
   @override
   void initState() {
     super.initState();
@@ -57,62 +77,85 @@ class _HomeState extends State<Home> {
   }
 
   Future<void> _loadSpeedTestUrl() async {
-    final url = await PppoeBridge.loadSpeedTestUrl();
-    setState(() {
-      _speedTestUrl = url ?? _speedTestUrl; // 如果未设置，则保留默认值
-      _speedTestUrlController.text = _speedTestUrl;
-    });
+    try {
+      final url = await PppoeBridge.loadSpeedTestUrl();
+      if (!mounted) return;
+      setState(() {
+        _speedTestUrl = url ?? _speedTestUrl;
+        _speedTestUrlController.text = _speedTestUrl;
+      });
+    } catch (e) {
+      _showMessage('Failed to load speed test URL: $e', error: true);
+    }
   }
 
   Future<void> _refreshInterfaces() async {
     if (_isLoadingInterfaces) return;
-
-    setState(() {
-      _isLoadingInterfaces = true;
-      _availableInterfaces = [];
-      _selectedInterface = null;
-    });
-
+    setState(() => _isLoadingInterfaces = true);
     try {
-      print("Calling PppoeBridge.getNetworkInterfaces...");
       final interfaces = await PppoeBridge.getNetworkInterfaces();
-      print("Received interfaces from Native: $interfaces");
+      if (!mounted) return;
       setState(() {
-        _availableInterfaces = interfaces;
+        _availableInterfaces = interfaces.toSet().toList();
+        if (!_availableInterfaces.contains(_selectedInterface)) {
+          _selectedInterface = null;
+        }
       });
     } catch (e) {
-      print("Error calling getNetworkInterfaces: $e");
-    }finally {
-      setState(() {
-        _isLoadingInterfaces = false;
-      });
+      _showMessage('Failed to load interfaces: $e', error: true);
+    } finally {
+      if (mounted) setState(() => _isLoadingInterfaces = false);
     }
   }
+
   Future<void> _loadDnsSettings() async {
-    final settings = await PppoeBridge.loadDnsSettings();
-    setState(() {
-      _useCustomDns = settings['useCustom'] as bool? ?? false;
-      _customDns1.text = settings['dns1'] as String? ?? '';
-      _customDns2.text = settings['dns2'] as String? ?? '';
-    });
+    try {
+      final settings = await PppoeBridge.loadDnsSettings();
+      if (!mounted) return;
+      setState(() {
+        _useCustomDns = settings['useCustom'] as bool? ?? false;
+        _customDns1.text = settings['dns1'] as String? ?? '';
+        _customDns2.text = settings['dns2'] as String? ?? '';
+      });
+    } catch (e) {
+      _showMessage('Failed to load DNS settings: $e', error: true);
+    }
   }
 
   Timer? _saveDnsDebounce;
+  Future<void> _persistDnsSettings() async {
+    _requireSuccess(await PppoeBridge.saveDnsSettings(
+      useCustom: _useCustomDns,
+      dns1: _customDns1.text,
+      dns2: _customDns2.text,
+    ), 'Failed to save DNS settings');
+  }
+
   void _saveDnsSettings() {
     _saveDnsDebounce?.cancel();
-    _saveDnsDebounce = Timer(const Duration(milliseconds: 500), () {
-      PppoeBridge.saveDnsSettings(
-          useCustom: _useCustomDns,
-          dns1: _customDns1.text,
-          dns2: _customDns2.text
-      );
+    _saveDnsDebounce = Timer(const Duration(milliseconds: 500), () async {
+      try {
+        await _persistDnsSettings();
+      } catch (e) {
+        _showMessage('$e', error: true);
+      }
     });
   }
+
   void _startPeerPolling() {
     _poll?.cancel();
     _poll = Timer.periodic(const Duration(seconds: 1), (_) async {
-      final peer = await PppoeBridge.readPeerEnv();
-      setState(() { _peer = Map.from(peer); });
+      if (_isPolling) return;
+      _isPolling = true;
+      try {
+        final peer = await PppoeBridge.readPeerEnv();
+        if (mounted) setState(() => _peer = peer);
+      } catch (e) {
+        if (mounted && _peer.isNotEmpty) setState(() => _peer = {});
+        debugPrint('Failed to read peer environment: $e');
+      } finally {
+        _isPolling = false;
+      }
     });
   }
 
@@ -120,20 +163,14 @@ class _HomeState extends State<Home> {
     _logSubscription?.cancel();
     _logSubscription = PppoeBridge.logStream.listen(
           (newLine) {
+        if (!mounted) return;
         setState(() {
-          _logLines.add(newLine);
-          if (_logLines.length > 500) {
-            _logLines.removeAt(0);
-          }
-        });
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (_logScrollController.hasClients) {
-            _logScrollController.jumpTo(_logScrollController.position.maxScrollExtent);
-          }
+          _logs.add(newLine);
         });
       },
       onError: (e) {
-        setState(() { _logLines.add("!!! 日志流错误: $e"); });
+        if (!mounted) return;
+        setState(() { _logs.add("[ERROR] [app] event=capture_error $e"); });
       },
     );
   }
@@ -141,197 +178,167 @@ class _HomeState extends State<Home> {
 
   @override
   void dispose() {
+    _operation++;
+    _speedTest?.cancel();
+    _user.dispose();
+    _pass.dispose();
+    _mtu.dispose();
+    _mru.dispose();
     _poll?.cancel();
     _logSubscription?.cancel();
-    _logScrollController.dispose();
     _customDns1.dispose();
     _customDns2.dispose();
     _saveDnsDebounce?.cancel();
     _speedTestUrlController.dispose();
     super.dispose();
   }
+  bool _isCurrentOperation(int operation) => mounted && operation == _operation;
+
   Future<void> _applyAndStart() async {
-    setState(() { _logLines.clear(); });
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Starting dialing attempt...')));
+    if (_isOperating) return;
+    final operation = ++_operation;
+    setState(() {
+      _isOperating = true;
+      _logs.clear();
+    });
+    _showMessage('Starting dialing attempt...');
     int? savedLogId;
-    String finalStatusMessage = "Unknown error occurred";
-
+    bool dialSucceeded = false;
+    bool dialRequested = false;
     try {
-      await PppoeBridge.writeCreds(_user.text, _pass.text);
-      final ifaceToSend = (_selectedInterface?.trim().isEmpty ?? true) ? null : _selectedInterface!.trim();
-      await PppoeBridge.writeIface(ifaceToSend);
-      await PppoeBridge.writeMtuMru(int.tryParse(_mtu.text), int.tryParse(_mru.text));
-
-      final dialResult = await PppoeBridge.startDialingAttempt();
-      final initialStatus = dialResult['status'] as String? ?? "Failure (Unknown)";
-      savedLogId = dialResult['logId'] as int?;
-      finalStatusMessage = initialStatus;
-
-      print("[DEBUG] Dial result: Status='$initialStatus', LogID=$savedLogId");
-
-      if (initialStatus.startsWith("Success")) {
-        print("[DEBUG] Dialing succeeded. Preparing VPN...");
-        final vpnPrepared = await PppoeBridge.prepareVpn();
-        print("[DEBUG] prepareVpn returned: $vpnPrepared");
-
-        if (vpnPrepared == true) {
-          print("[DEBUG] VPN prepared. Calling startVpn...");
-          await PppoeBridge.startVpn();
-          print("[DEBUG] startVpn called.");
-          finalStatusMessage = "Success (VPN Started)";
-          if (savedLogId != null) {
-            await PppoeBridge.updateLogStatus(savedLogId, finalStatusMessage);
-          }
-        } else {
-          print("[ERROR] VPN prepareVpn returned false.");
-          finalStatusMessage = "Failure (VPN Permission)";
-          if (savedLogId != null) {
-            await PppoeBridge.updateLogStatus(savedLogId, finalStatusMessage);
-          }
-          throw finalStatusMessage;
+      _requireSuccess(await PppoeBridge.writeCreds(_user.text, _pass.text), 'Failed to save credentials');
+      if (!_isCurrentOperation(operation)) return;
+      final iface = _selectedInterface?.trim();
+      _requireSuccess(await PppoeBridge.writeIface(iface == null || iface.isEmpty ? null : iface), 'Failed to save interface');
+      if (!_isCurrentOperation(operation)) return;
+      _requireSuccess(await PppoeBridge.writeMtuMru(int.tryParse(_mtu.text), int.tryParse(_mru.text)), 'Failed to save MTU/MRU');
+      if (!_isCurrentOperation(operation)) return;
+      _saveDnsDebounce?.cancel();
+      await _persistDnsSettings();
+      if (!_isCurrentOperation(operation)) return;
+      dialRequested = true;
+      final result = await PppoeBridge.startDialingAttempt();
+      if (!_isCurrentOperation(operation)) return;
+      savedLogId = result['logId'] as int?;
+      final status = result['status'] as String? ?? 'Failure (Unknown)';
+      if (!status.startsWith('Success')) throw StateError(status);
+      dialSucceeded = true;
+      _requireSuccess(await PppoeBridge.prepareVpn(), 'VPN permission denied');
+      if (!_isCurrentOperation(operation)) return;
+      _requireSuccess(await PppoeBridge.startVpn(), 'VPN failed to start');
+      if (!_isCurrentOperation(operation)) return;
+      if (savedLogId != null) {
+        final saved = await PppoeBridge.updateLogStatus(savedLogId, 'Success (VPN Started)');
+        if (!saved) {
+          if (_isCurrentOperation(operation)) _showMessage('VPN started, but failed to update log status', error: true);
+          return;
         }
-      } else {
-        print("[ERROR] Dialing attempt failed with status: $initialStatus");
-        throw finalStatusMessage;
       }
-
-      ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(finalStatusMessage)));
-
+      if (_isCurrentOperation(operation)) _showMessage('Success (VPN Started)');
     } catch (e) {
-      print("[ERROR] Exception in _applyAndStart: $e");
-      final errorMessage = e.toString();
-      final displayError = (e is String && e.startsWith("Failure")) ? e : "Error: $errorMessage";
-
-      if (savedLogId != null && !finalStatusMessage.startsWith("Failure") && !finalStatusMessage.startsWith("Timeout")) {
-        finalStatusMessage = "Failure (Unknown)";
-        await PppoeBridge.updateLogStatus(savedLogId, finalStatusMessage);
+      if (!_isCurrentOperation(operation)) return;
+      if (savedLogId == null) {
+        setState(() => _logs.add(
+          '${DateTime.now().toUtc().toIso8601String()} [ERROR] [app] '
+          'event=${dialRequested ? 'bridge_failed' : 'configuration_failed'} $e',
+        ));
       }
-
-      ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(displayError), backgroundColor: NothingColors.redAccent));
+      if (savedLogId != null && dialSucceeded) {
+        await PppoeBridge.updateLogStatus(savedLogId, 'Failure ($e)');
+      }
+      if (_isCurrentOperation(operation)) _showMessage('$e', error: true);
+    } finally {
+      if (_isCurrentOperation(operation)) setState(() => _isOperating = false);
     }
   }
 
   Future<void> _testStartVpn() async {
-    ScaffoldMessenger.of(context).hideCurrentSnackBar();
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Testing VPN start...')));
-
+    if (_isOperating) return;
+    final operation = ++_operation;
+    setState(() => _isOperating = true);
     try {
-      print("[DEBUG_TEST] Calling prepareVpn...");
-      final vpnPrepared = await PppoeBridge.prepareVpn();
-      print("[DEBUG_TEST] prepareVpn returned: $vpnPrepared");
-
-      if (vpnPrepared == true) {
-        print("[DEBUG_TEST] VPN prepared. Calling startVpn...");
-        await PppoeBridge.startVpn();
-        print("[DEBUG_TEST] startVpn called.");
-        ScaffoldMessenger.of(context).hideCurrentSnackBar();
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Test: startVpn command sent successfully.'))
-        );
-      } else {
-        print("[DEBUG_TEST] VPN prepareVpn returned false. Permission likely needed or denied.");
-        ScaffoldMessenger.of(context).hideCurrentSnackBar();
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Test: VPN permission needed or denied.'))
-        );
-      }
-    } catch (e, s) {
-      print("[DEBUG_TEST] Exception in _testStartVpn: $e\n$s");
-      ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Test Error: $e'), backgroundColor: NothingColors.redAccent));
+      _requireSuccess(await PppoeBridge.prepareVpn(), 'VPN permission denied');
+      if (!_isCurrentOperation(operation)) return;
+      _requireSuccess(await PppoeBridge.startVpn(), 'VPN failed to start');
+      if (_isCurrentOperation(operation)) _showMessage('VPN started.');
+    } catch (e) {
+      if (_isCurrentOperation(operation)) _showMessage('$e', error: true);
+    } finally {
+      if (_isCurrentOperation(operation)) setState(() => _isOperating = false);
     }
   }
+
   Future<void> _stopAll() async {
-    await PppoeBridge.stopVpn();
-    await PppoeBridge.control("stop");
+    if (_isStopping) return;
+    final operation = ++_operation;
+    setState(() {
+      _isStopping = true;
+      _isOperating = true;
+    });
+    final errors = <String>[];
+    // Both cleanup operations must run even when one fails.
+    for (final action in [() => PppoeBridge.control('stop'), PppoeBridge.stopVpn]) {
+      try {
+        _requireSuccess(await action(), 'Stop command failed');
+      } catch (e) {
+        errors.add('$e');
+      }
+    }
+    if (!_isCurrentOperation(operation)) return;
+    setState(() {
+      _isStopping = false;
+      _isOperating = false;
+    });
+    _showMessage(errors.isEmpty ? 'Stopped.' : errors.join('; '), error: errors.isNotEmpty);
   }
 
+  Future<void> _cycleInterface() async {
+    if (_isOperating) return;
+    final operation = ++_operation;
+    setState(() => _isOperating = true);
+    try {
+      _requireSuccess(await PppoeBridge.control('cycle'), 'Failed to switch interface');
+    } catch (e) {
+      if (_isCurrentOperation(operation)) _showMessage('$e', error: true);
+    } finally {
+      if (_isCurrentOperation(operation)) setState(() => _isOperating = false);
+    }
+  }
 
-  HttpClient? _httpClient;
   Future<void> _startSpeedTest() async {
+    if (_isTesting) return;
+    final test = SpeedTest();
+    _speedTest = test;
     setState(() {
       _isTesting = true;
       _errorMessage = '';
       _downloadRate = '0.0';
     });
-
-    _httpClient = HttpClient();
-    final stopwatch = Stopwatch()..start(); // 主计时器
-    _uiUpdateThrottle.reset();             // 重置 UI 计时器
-    _uiUpdateThrottle.start();
-    int bytesReceived = 0;
-
+    bool isCurrent() => mounted && identical(_speedTest, test);
     try {
-      final request = await _httpClient!.getUrl(
-          Uri.parse(_speedTestUrl)
-      );
-      final response = await request.close();
-
-      await for (var chunk in response) {
-        if (!_isTesting) {
-          _httpClient?.close(force: true);
-          break;
-        }
-
-        bytesReceived += chunk.length;
-        final elapsedMs = stopwatch.elapsedMilliseconds;
-
-        // --- 这就是节流阀 ---
-        // 仅当 (A)  elapsedMs > 0
-        // 并且 (B) 距离上次 UI 更新已超过 250 毫秒
-        if (elapsedMs > 0 && _uiUpdateThrottle.elapsedMilliseconds > 250) {
-          final speed = (bytesReceived / (elapsedMs / 1000.0)) / 1048576.0;
-
-          setState(() {
-            _downloadRate = speed.toStringAsFixed(2);
-          });
-
-          _uiUpdateThrottle.reset(); // 重置 UI 计时器
-        }
-      }
-
-      stopwatch.stop();
-      _uiUpdateThrottle.stop();
-      _uiUpdateThrottle.reset();
-
-      if (_isTesting) { // 仅在测试未被取消时执行
-        // 确保显示最终的精确速度，而不是 250ms 前的速度
-        final elapsedMs = stopwatch.elapsedMilliseconds;
-        if (elapsedMs > 0) {
-          final speed = (bytesReceived / (elapsedMs / 1000.0)) / 1048576.0;
-          setState(() {
-            _downloadRate = speed.toStringAsFixed(2);
-            _isTesting = false;
-          });
-        } else {
-          setState(() { _isTesting = false; });
-        }
-      }
-
-    } catch (e) {
-      setState(() {
-        if (e is FormatException) {
-          _errorMessage = "Test failed: Invalid URL format.";
-        } else {
-          _errorMessage = "Test failed: Check URL or connection.";
-        }
-        print("Speed test error: $e");
-        _isTesting = false;
+      final rate = await test.run(_speedTestUrl, onProgress: (rate) {
+        if (isCurrent()) setState(() => _downloadRate = rate.toStringAsFixed(2));
       });
+      if (isCurrent()) setState(() => _downloadRate = rate.toStringAsFixed(2));
+    } catch (e) {
+      if (isCurrent()) setState(() => _errorMessage = 'Test failed: $e');
     } finally {
-      _httpClient?.close(force: true);
-      _httpClient = null;
-      if (stopwatch.isRunning) stopwatch.stop();
-      if (_uiUpdateThrottle.isRunning) _uiUpdateThrottle.stop();
+      if (isCurrent()) {
+        setState(() {
+          _speedTest = null;
+          _isTesting = false;
+        });
+      }
     }
   }
 
   void _cancelSpeedTest() {
+    final test = _speedTest;
+    _speedTest = null;
+    test?.cancel();
     setState(() {
       _isTesting = false;
-      _errorMessage = "Test canceled.";
+      _errorMessage = 'Test canceled.';
       _downloadRate = '0.0';
     });
   }
@@ -342,6 +349,13 @@ class _HomeState extends State<Home> {
 
     await showDialog(
         context: context,
+        animationStyle: reduceMotion(context)
+            ? AnimationStyle.noAnimation
+            : const AnimationStyle(
+                duration: Duration(milliseconds: 200),
+                reverseDuration: Duration(milliseconds: 150),
+                curve: Curves.easeOutCubic,
+              ),
         builder: (context) {
           return AlertDialog(
             title: const Text("Speed Test Settings"),
@@ -359,13 +373,17 @@ class _HomeState extends State<Home> {
               ),
               ElevatedButton(
                 child: const Text("Save"),
-                onPressed: () {
+                onPressed: () async {
                   final newUrl = _speedTestUrlController.text.trim();
-                  setState(() {
-                    _speedTestUrl = newUrl; // 立即更新 UI
-                  });
-                  PppoeBridge.saveSpeedTestUrl(newUrl); // 异步保存
-                  Navigator.pop(context);
+                  try {
+                    SpeedTest.parseUrl(newUrl);
+                    await PppoeBridge.saveSpeedTestUrl(newUrl);
+                    if (!mounted || !context.mounted) return;
+                    setState(() => _speedTestUrl = newUrl);
+                    Navigator.pop(context);
+                  } catch (e) {
+                    _showMessage('Failed to save URL: $e', error: true);
+                  }
                 },
               ),
             ],
@@ -377,9 +395,6 @@ class _HomeState extends State<Home> {
 
   @override
   Widget build(BuildContext context) {
-    final dns1 = _peer["DNS1"] ?? "-";
-    final dns2 = _peer["DNS2"] ?? "-";
-    final logText = _logLines.join('\n');
 
     return Scaffold(
       appBar: AppBar(
@@ -410,7 +425,7 @@ class _HomeState extends State<Home> {
             Row(children: [
               Flexible(
                 child: DropdownButtonFormField<String?>(
-                  value: _selectedInterface,
+                  initialValue: _selectedInterface,
                   hint: const Text("自动选择接口"),
                   disabledHint: _isLoadingInterfaces ? const Text("正在加载...") : null,
                   decoration: const InputDecoration(labelText: "网络接口"),
@@ -418,7 +433,7 @@ class _HomeState extends State<Home> {
                     const DropdownMenuItem<String?>(value: null, child: Text("自动选择")),
                     ..._availableInterfaces.map((iface) {
                       return DropdownMenuItem<String?>(value: iface, child: Text(iface));
-                    }).toList(),
+                    }),
                   ],
                   onChanged: _isLoadingInterfaces ? null : (String? newValue) {
                     setState(() { _selectedInterface = newValue; });
@@ -431,6 +446,21 @@ class _HomeState extends State<Home> {
                 onPressed: _isLoadingInterfaces ? null : _refreshInterfaces,
                 tooltip: "刷新网络接口列表",
               ),
+            ]),
+            Row(children: [
+              Expanded(child: TextField(
+                controller: _mtu,
+                enabled: !_isOperating,
+                decoration: const InputDecoration(labelText: "MTU (576–1492)"),
+                keyboardType: TextInputType.number,
+              )),
+              const SizedBox(width: 12),
+              Expanded(child: TextField(
+                controller: _mru,
+                enabled: !_isOperating,
+                decoration: const InputDecoration(labelText: "MRU (576–1492)"),
+                keyboardType: TextInputType.number,
+              )),
             ]),
             Row(children: [
               Expanded(child: TextField(
@@ -465,33 +495,60 @@ class _HomeState extends State<Home> {
               alignment: WrapAlignment.start,
               children: [
                 ElevatedButton(
-                    onPressed: _applyAndStart,
+                    onPressed: _isOperating ? null : _applyAndStart,
                     child: const Text("启动拨号 + VPN")
                 ),
                 OutlinedButton(
-                  onPressed: _stopAll,
-                  child: const Text("停止"),
+                  onPressed: _isStopping ? null : _stopAll,
                   style: OutlinedButton.styleFrom(
                     backgroundColor: NothingColors.redAccent,
                     foregroundColor: NothingColors.white,
                     side: BorderSide(color: NothingColors.redAccent),
                   ),
+                  child: const Text("停止"),
                 ),
                 TextButton(
-                    onPressed: () => PppoeBridge.control("cycle"),
+                    onPressed: _isOperating ? null : _cycleInterface,
                     child: const Text("切换接口")
                 ),
                 OutlinedButton(
-                  onPressed: _testStartVpn,
-                  child: const Text("Test VPN"),
+                  onPressed: _isOperating ? null : _testStartVpn,
                   style: OutlinedButton.styleFrom(
                     backgroundColor: NothingColors.white,
                     foregroundColor: NothingColors.black,
+                    disabledBackgroundColor: const Color(0xFF1F1F1F),
+                    disabledForegroundColor: NothingColors.grey,
                   ),
+                  child: const Text("Test VPN"),
                 ),
               ],
             ),
 
+            const SizedBox(height: 12),
+            Semantics(
+              liveRegion: true,
+              child: AnimatedSwitcher(
+                duration: motionDuration(context),
+                child: Row(
+                  key: ValueKey(_isStopping ? 'stopping' : _isOperating ? 'working' : 'ready'),
+                  children: [
+                    Icon(
+                      _isStopping ? Icons.stop_circle_outlined : _isOperating ? Icons.sync : Icons.circle_outlined,
+                      size: 14,
+                      color: _isStopping ? NothingColors.redAccent : NothingColors.grey,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(_isStopping ? '正在停止…' : _isOperating ? '正在处理…' : '就绪'),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              "接口: ${_peer['IF'] ?? '-'}  IP: ${_peer['IPLOCAL'] ?? '-'}\n"
+              "DNS 1: ${_peer['DNS1'] ?? '-'}  DNS 2: ${_peer['DNS2'] ?? '-'}",
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
             const SizedBox(height: 16),
             Card(
               shape: RoundedRectangleBorder(
@@ -517,11 +574,11 @@ class _HomeState extends State<Home> {
                         if (_isTesting)
                           OutlinedButton(
                             onPressed: _cancelSpeedTest,
-                            child: const Text("取消测试"),
                             style: OutlinedButton.styleFrom(
                               foregroundColor: NothingColors.redAccent,
                               side: BorderSide(color: NothingColors.redAccent),
                             ),
+                            child: const Text("取消测试"),
                           )
                         else
                           ElevatedButton(
@@ -529,14 +586,18 @@ class _HomeState extends State<Home> {
                             child: const Text("开始下载测试"),
                           ),
 
-                        if (_errorMessage.isNotEmpty)
-                          Padding(
+                        AnimatedSize(
+                          duration: motionDuration(context),
+                          curve: Curves.easeOutCubic,
+                          alignment: Alignment.topCenter,
+                          child: _errorMessage.isEmpty ? const SizedBox(width: double.infinity) : Padding(
                             padding: const EdgeInsets.only(top: 8.0),
                             child: Text(
                               _errorMessage,
                               style: const TextStyle(color: NothingColors.redAccent),
                             ),
                           ),
+                        ),
                       ],
                     ),
                   ),
@@ -557,25 +618,7 @@ class _HomeState extends State<Home> {
 
             const SizedBox(height: 12),
             Text("日志：", style: Theme.of(context).textTheme.labelMedium),
-            Container(
-              padding: const EdgeInsets.all(8),
-              height: 320,
-              clipBehavior: Clip.antiAlias,
-              decoration: BoxDecoration(
-                border: Border.all(color: NothingColors.grey),
-                borderRadius: BorderRadius.circular(kNothingBorderRadius),
-              ),
-              child: SingleChildScrollView(
-                controller: _logScrollController,
-                child: Text(
-                    logText,
-                    style: const TextStyle(
-                      fontFamily: "monospace",
-                      color: NothingColors.white,
-                    )
-                ),
-              ),
-            ),
+            LogView(report: _logs.report),
           ],
         ),
       ),
@@ -593,12 +636,22 @@ class _HomeState extends State<Home> {
           ],
         ),
         const SizedBox(height: 4),
-        Text(
-          value,
-          style: const TextStyle(
-            fontSize: 34,
-            fontWeight: FontWeight.bold,
-            color: NothingColors.white,
+        Semantics(
+          label: '$title $value MB/s',
+          child: ExcludeSemantics(
+            child: TweenAnimationBuilder<double>(
+              tween: Tween<double>(end: double.tryParse(value) ?? 0),
+              duration: motionDuration(context, 240),
+              curve: Curves.easeOutCubic,
+              builder: (context, rate, child) => Text(
+                rate.toStringAsFixed(2),
+                style: const TextStyle(
+                  fontSize: 34,
+                  fontWeight: FontWeight.bold,
+                  color: NothingColors.white,
+                ),
+              ),
+            ),
           ),
         ),
         const Text("MB/s", style: TextStyle(color: NothingColors.grey)),

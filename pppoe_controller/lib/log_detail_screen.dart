@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'pppoe_bridge.dart';
 import 'nothing_theme.dart';
+import 'log_diagnostics.dart';
+import 'log_view.dart';
+import 'motion.dart';
 
 class LogDetailScreen extends StatefulWidget {
   final int logId;
@@ -56,7 +58,8 @@ class _LogDetailScreenState extends State<LogDetailScreen> {
   Future<void> _saveNote() async {
     if (_isSavingNote || _logDetail == null) return;
     setState(() => _isSavingNote = true);
-    final success = await PppoeBridge.updateLogNote(widget.logId, _noteController.text.trim());
+    final note = _noteController.text.trim();
+    final success = await PppoeBridge.updateLogNote(widget.logId, note);
     if (!mounted) return;
     setState(() => _isSavingNote = false);
 
@@ -67,13 +70,14 @@ class _LogDetailScreenState extends State<LogDetailScreen> {
         )
     );
     if(success) {
-      setState(() => _logDetail = _logDetail?.copyWith(note: _noteController.text.trim()));
+      setState(() => _logDetail = _logDetail?.copyWith(note: note));
     }
   }
 
   Future<void> _deleteEntry() async {
     final confirmed = await showDialog<bool>(
       context: context,
+      animationStyle: reduceMotion(context) ? AnimationStyle.noAnimation : null,
       builder: (context) => AlertDialog(
         title: const Text('Delete Log Entry?'),
         content: const Text('Are you sure you want to delete this log entry?'),
@@ -87,7 +91,7 @@ class _LogDetailScreenState extends State<LogDetailScreen> {
       ),
     );
 
-    if (confirmed == true) {
+    if (confirmed == true && mounted) {
       final success = await PppoeBridge.deleteLogEntry(widget.logId);
       if (success && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Entry deleted.')));
@@ -101,17 +105,6 @@ class _LogDetailScreenState extends State<LogDetailScreen> {
     }
   }
 
-  Future<void> _copyLogToClipboard() async {
-    if (_logDetail == null) return;
-    await Clipboard.setData(ClipboardData(text: _logDetail!.logContent));
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Log content copied to clipboard.'))
-      );
-    }
-  }
-
   Future<void> _shareLogNatively() async {
     if (_logDetail == null) return;
 
@@ -122,20 +115,21 @@ class _LogDetailScreenState extends State<LogDetailScreen> {
 
     final content = """
 Log Entry: $formattedDate
-Status: ${detail.status}
-Note: ${detail.note ?? '(No note)'}
+Status: ${sanitizeLog(detail.status)}
+Note: ${sanitizeLog(detail.note ?? '(No note)')}
 -------------------------------------
 Log Content:
 -------------------------------------
-${detail.logContent}
+${LogReport.parse(detail.logContent).exportText}
 """;
 
     try {
       // 2. 调用新的 MethodChannel 方法
-      await PppoeBridge.shareLogAsText(
+      final success = await PppoeBridge.shareLogAsText(
         text: content,
         subject: fileName, // (Email app 会使用这个作为标题)
       );
+      if (!success) throw StateError('Share request failed');
     } catch (e) {
       if(mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -166,7 +160,7 @@ ${detail.logContent}
       body = ListView(
         padding: const EdgeInsets.all(16.0),
         children: [
-          Text('Status: ${detail.status}', style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: NothingColors.grey)),
+          Text('Status: ${sanitizeLog(detail.status)}', style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: NothingColors.grey)),
           const SizedBox(height: 16),
           TextField(
             controller: _noteController,
@@ -184,40 +178,7 @@ ${detail.logContent}
             textInputAction: TextInputAction.done,
           ),
           const SizedBox(height: 16),
-          Stack(
-            children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('Log Content:', style: TextStyle(color: NothingColors.grey)),
-                  const SizedBox(height: 8),
-                  Container(
-                    padding: const EdgeInsets.fromLTRB(8.0, 8.0, 40.0, 8.0),
-                    clipBehavior: Clip.antiAlias,
-                    width: double.infinity,
-                    decoration: BoxDecoration(
-                      border: Border.all(color: NothingColors.grey),
-                      borderRadius: BorderRadius.circular(kNothingBorderRadius),
-                    ),
-                    child: SelectableText(
-                      detail.logContent.isEmpty ? '(No log content captured)' : detail.logContent,
-                      style: const TextStyle(fontFamily: 'monospace', fontSize: 16),
-                    ),
-                  ),
-                ],
-              ),
-              Positioned(
-                top: 30,
-                right: 4,
-                child: IconButton(
-                  icon: const Icon(Icons.copy_outlined, size: 20),
-                  onPressed: _copyLogToClipboard,
-                  tooltip: 'Copy Log Content',
-                  color: NothingColors.grey,
-                ),
-              ),
-            ],
-          ),
+          LogView(report: LogReport.parse(detail.logContent)),
         ],
       );
     }

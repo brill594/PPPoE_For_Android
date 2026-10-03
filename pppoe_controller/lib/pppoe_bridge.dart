@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 class LogSummary {
@@ -84,21 +85,14 @@ class PppoeBridge {
     try {
       return await _channel.invokeMethod('updateLogStatus', {'id': id, 'status': status}) ?? false;
     } catch (e) {
-      print("Error updating log status for ID $id: $e");
+      debugPrint("Error updating log status for ID $id: $e");
       return false;
     }
   }
 
   static Future<List<String>> getNetworkInterfaces() async {
-    try {
-      final List<dynamic>? interfaces = await _channel.invokeMethod('getNetworkInterfaces');
-      // 将 List<dynamic> 转换为 List<String>
-      return interfaces?.map((e) => e.toString()).toList() ?? [];
-    } catch (e) {
-      // 发生错误时返回空列表
-      print("Error getting network interfaces: $e");
-      return [];
-    }
+    final List<dynamic>? interfaces = await _channel.invokeMethod('getNetworkInterfaces');
+    return interfaces?.map((e) => e.toString()).toList() ?? [];
   }
   static Future<bool> writeCreds(String user, String pass) async {
     final ok = await _channel.invokeMethod<bool>('writeCreds', {'user': user, 'pass': pass});
@@ -142,30 +136,20 @@ class PppoeBridge {
   }
 
   static Future<List<LogSummary>> getLogHistory() async {
-    try {
-      final List<dynamic>? history = await _channel.invokeMethod('getLogHistory');
-      return history?.map((map) => LogSummary.fromMap(map as Map)).toList() ?? [];
-    } catch (e) {
-      print("Error getting log history: $e");
-      return [];
-    }
+    final List<dynamic>? history = await _channel.invokeMethod('getLogHistory');
+    return history?.map((map) => LogSummary.fromMap(map as Map)).toList() ?? [];
   }
 
   static Future<LogDetail?> getLogDetails(int id) async {
-    try {
-      final Map<dynamic, dynamic>? detail = await _channel.invokeMethod('getLogDetails', {'id': id});
-      return detail != null ? LogDetail.fromMap(detail as Map) : null;
-    } catch (e) {
-      print("Error getting log details for ID $id: $e");
-      return null;
-    }
+    final Map<dynamic, dynamic>? detail = await _channel.invokeMethod('getLogDetails', {'id': id});
+    return detail != null ? LogDetail.fromMap(detail) : null;
   }
 
   static Future<bool> updateLogNote(int id, String? note) async {
     try {
       return await _channel.invokeMethod('updateLogNote', {'id': id, 'note': note}) ?? false;
     } catch (e) {
-      print("Error updating note for ID $id: $e");
+      debugPrint("Error updating note for ID $id: $e");
       return false;
     }
   }
@@ -174,7 +158,7 @@ class PppoeBridge {
     try {
       return await _channel.invokeMethod('deleteLogEntry', {'id': id}) ?? false;
     } catch (e) {
-      print("Error deleting log entry ID $id: $e");
+      debugPrint("Error deleting log entry ID $id: $e");
       return false;
     }
   }
@@ -187,25 +171,17 @@ class PppoeBridge {
       });
       return result ?? false; // 如果原生代码返回 null，则默认为 false
     } catch (e) {
-      print("Error calling shareLogAsText: $e");
+      debugPrint("Error calling shareLogAsText: $e");
       return false;
     }
   }
 
   static Future<void> saveSpeedTestUrl(String url) async {
-    try {
-      await _channel.invokeMethod('saveSpeedTestUrl', {'url': url});
-    } catch (e) {
-      print("Error saving speed test URL: $e");
-    }
+    final saved = await _channel.invokeMethod<bool>('saveSpeedTestUrl', {'url': url});
+    if (saved != true) throw StateError('Failed to save speed test URL');
   }
 
   static Future<String?> loadSpeedTestUrl() async {
-    try {
-      return await _channel.invokeMethod<String>('loadSpeedTestUrl');
-    } catch (e) {
-      print("Error loading speed test URL: $e");
-      return null;
-    }
+    return _channel.invokeMethod<String>('loadSpeedTestUrl');
   }
 }

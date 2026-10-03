@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
+import 'motion.dart';
 
-const String? kNothingFontFamily = 'VT323';
+const String kNothingFontFamily = 'VT323';
 
 const double kNothingBorderRadius = 24.0;
 
@@ -16,6 +17,15 @@ ThemeData getNothingTheme() {
     // 基础设置
       brightness: Brightness.dark,
       fontFamily: kNothingFontFamily,
+
+      pageTransitionsTheme: const PageTransitionsTheme(
+        builders: {
+          TargetPlatform.android: NothingPageTransitionsBuilder(),
+        },
+      ),
+      iconButtonTheme: IconButtonThemeData(
+        style: ButtonStyle(foregroundBuilder: buttonPressFeedback),
+      ),
 
       // 全局背景色
       scaffoldBackgroundColor: NothingColors.black,
@@ -92,6 +102,7 @@ ThemeData getNothingTheme() {
       // --- 按钮 ---
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
+          foregroundBuilder: buttonPressFeedback,
           backgroundColor: NothingColors.white,
           foregroundColor: NothingColors.black,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(kNothingBorderRadius)),
@@ -100,6 +111,7 @@ ThemeData getNothingTheme() {
       ),
       outlinedButtonTheme: OutlinedButtonThemeData(
         style: OutlinedButton.styleFrom(
+          foregroundBuilder: buttonPressFeedback,
           foregroundColor: NothingColors.white,
           side: BorderSide(color: NothingColors.white),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(kNothingBorderRadius)),
@@ -108,6 +120,7 @@ ThemeData getNothingTheme() {
       ),
       textButtonTheme: TextButtonThemeData(
         style: TextButton.styleFrom(
+          foregroundBuilder: buttonPressFeedback,
           foregroundColor: NothingColors.white,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(kNothingBorderRadius)),
           textStyle: TextStyle(fontFamily: kNothingFontFamily, fontWeight: FontWeight.bold),

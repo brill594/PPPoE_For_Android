@@ -15,6 +15,8 @@ class _HistoryScreenState extends State<HistoryScreen> {
   List<LogSummary> _history = [];
   bool _isLoading = true;
   String? _error;
+  int _loadVersion = 0;
+  final Set<int> _deleting = {};
 
   @override
   void initState() {
@@ -24,19 +26,20 @@ class _HistoryScreenState extends State<HistoryScreen> {
 
   Future<void> _loadHistory() async {
     if (!mounted) return;
+    final version = ++_loadVersion;
     setState(() {
       _isLoading = true;
       _error = null;
     });
     try {
       final history = await PppoeBridge.getLogHistory();
-      if (!mounted) return;
+      if (!mounted || version != _loadVersion) return;
       setState(() {
-        _history = history;
+        _history = history.where((entry) => !_deleting.contains(entry.id)).toList();
         _isLoading = false;
       });
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || version != _loadVersion) return;
       setState(() {
         _error = "Failed to load history: $e";
         _isLoading = false;
@@ -44,24 +47,16 @@ class _HistoryScreenState extends State<HistoryScreen> {
     }
   }
 
-  // 此函数负责后端删除，并在失败时恢复 UI
-  Future<void> _performDelete(LogSummary entryToDelete, int index) async {
-    final success = await PppoeBridge.deleteLogEntry(entryToDelete.id);
-
-    if (success && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Entry deleted.')));
-      // 删除成功，UI 已更新，无需操作
-    } else if (mounted) {
-      // 删除失败！把条目加回到列表中
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Failed to delete entry. Restoring...'),
-          backgroundColor: NothingColors.redAccent
-      ));
-      // 在原来的位置插回去
-      setState(() {
-        _history.insert(index, entryToDelete);
-      });
-    }
+  Future<void> _performDelete(LogSummary entry) async {
+    final success = await PppoeBridge.deleteLogEntry(entry.id);
+    _deleting.remove(entry.id);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(success ? 'Entry deleted.' : 'Failed to delete entry.'),
+      backgroundColor: success ? null : NothingColors.redAccent,
+    ));
+    // Reload the authoritative list; indices can change during concurrent swipes.
+    await _loadHistory();
   }
 
   @override
@@ -87,15 +82,12 @@ class _HistoryScreenState extends State<HistoryScreen> {
               key: Key(entry.id.toString()),
               direction: DismissDirection.endToStart,
 
-              // onDismissed 会在滑动动画完成后立即触发
               onDismissed: (direction) {
-                // 1. (重要!) 同步从 UI 移除
                 setState(() {
-                  _history.removeAt(index);
+                  _deleting.add(entry.id);
+                  _history.removeWhere((item) => item.id == entry.id);
                 });
-
-                // 2. 异步调用后端删除 (如果失败会恢复)
-                _performDelete(entry, index);
+                _performDelete(entry);
               },
 
               background: Container(

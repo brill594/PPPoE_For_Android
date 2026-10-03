@@ -3,7 +3,6 @@ package com.brill.pppoe_controller.db
 import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.Query
-import androidx.room.Update
 
 @Dao
 interface LogEntryDao {
@@ -16,8 +15,14 @@ interface LogEntryDao {
     @Query("SELECT * FROM log_history WHERE id = :id")
     suspend fun getById(id: Long): LogEntry?
 
-    @Update
-    suspend fun update(logEntry: LogEntry)
+    @Query("UPDATE log_history SET status = :status WHERE id = :id")
+    suspend fun updateStatus(id: Long, status: String): Int
+
+    @Query("UPDATE log_history SET note = :note WHERE id = :id")
+    suspend fun updateNote(id: Long, note: String?): Int
+
+    @Query("UPDATE log_history SET logContent = logContent || :text WHERE id = :id")
+    suspend fun appendLog(id: Long, text: String): Int
 
     @Query("DELETE FROM log_history WHERE id = :id")
     suspend fun deleteById(id: Long): Int

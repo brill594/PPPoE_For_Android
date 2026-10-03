@@ -2,7 +2,7 @@ plugins {
     id("com.android.application")
     kotlin("android")
     id("dev.flutter.flutter-gradle-plugin")
-    id("com.google.devtools.ksp") version "2.1.0-1.0.29" // Or the version matching your Kotlin
+    id("com.google.devtools.ksp") version "2.2.20-2.0.4"
 }
 
 android {
@@ -40,12 +40,13 @@ android {
 }
 
 dependencies {
-    implementation("org.jetbrains.kotlin:kotlin-stdlib:2.1.0")
+    testImplementation("junit:junit:4.13.2")
+    implementation("org.jetbrains.kotlin:kotlin-stdlib:2.2.20")
     implementation("com.github.topjohnwu.libsu:core:5.2.2")
     implementation("com.github.topjohnwu.libsu:service:5.2.2")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-ktx:1.9.0")
-    val room_version = "2.6.1" // Use the latest stable version
+    val room_version = "2.8.4"
     implementation("androidx.room:room-runtime:$room_version")
     ksp("androidx.room:room-compiler:$room_version") // Use ksp instead of kapt if possible
     implementation("androidx.room:room-ktx:$room_version") // F

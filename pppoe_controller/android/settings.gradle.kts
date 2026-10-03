@@ -33,7 +33,7 @@ dependencyResolutionManagement {
         google()
         mavenCentral()
         maven("https://jitpack.io") // libsu 用
-        val storageUrl = System.getenv("FLUTTER_STORAGE_BASE_URL") ?: "https://storage.flutter-io.com"
+        val storageUrl = System.getenv("FLUTTER_STORAGE_BASE_URL") ?: "https://storage.googleapis.com"
         maven { url = uri("$storageUrl/download.flutter.io") }
 
 

@@ -10,37 +10,53 @@ import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.EventChannel
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.ActivityResult
-import java.io.BufferedReader
-import java.io.File
 import com.brill.pppoe_controller.db.AppDatabase
 import com.brill.pppoe_controller.db.LogEntry
-import kotlinx.coroutines.* import java.util.concurrent.CopyOnWriteArrayList
-import android.util.Log
-import com.topjohnwu.superuser.Shell
+import kotlinx.coroutines.*
+import com.brill.pppoe_controller.su.RootShell
+import com.brill.pppoe_controller.logging.RootLogStream
+import com.brill.pppoe_controller.logging.AttemptLog
+import com.brill.pppoe_controller.logging.LogSanitizer
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.ResultReceiver
 
 class MainActivity : FlutterFragmentActivity() {
     private val CHANNEL = "pppoe/bridge"
     private val LOG_CHANNEL = "pppoe/log_stream"
     private val db by lazy { AppDatabase.getDatabase(this) }
-    private val logBuffer = CopyOnWriteArrayList<String>()
-    private var isCapturingLog = false
-    private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var currentAttempt: AttemptLog? = null
+    private var captureReady = false
+    private var lastLogId: Long? = null
+    private val mainScope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
     private var monitoringJob: Job? = null
-    private val mainScope = CoroutineScope(Dispatchers.Main)
+    private var dialResult: MethodChannel.Result? = null
     private var flutterResult: MethodChannel.Result? = null
+    private var vpnStartResult: MethodChannel.Result? = null
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result: ActivityResult ->
-        if (result.resultCode == RESULT_OK) {
-            this.flutterResult?.success(true)
-        } else {
-            this.flutterResult?.success(false)
-        }
-        this.flutterResult = null
+        recordEvent(if (result.resultCode == RESULT_OK) "INFO" else "WARN",
+            if (result.resultCode == RESULT_OK) "vpn_permission_granted" else "vpn_permission_denied")
+        flutterResult?.success(result.resultCode == RESULT_OK)
+        flutterResult = null
     }
 
-    private var logStreamProcess: Process? = null
-    private var logStreamReader: BufferedReader? = null
+    private fun launchResult(result: MethodChannel.Result, block: suspend () -> Unit): Job =
+        mainScope.launch {
+            try {
+                block()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                result.error("OPERATION_FAILED", e.message, null)
+            }
+        }
+
+    private fun ioResult(result: MethodChannel.Result, block: () -> Any?) {
+        launchResult(result) { result.success(withContext(Dispatchers.IO) { block() }) }
+    }
 
     private val PREFS_NAME = "pppoe_settings"
     private val KEY_CUSTOM_DNS_ENABLED = "use_custom_dns"
@@ -48,149 +64,140 @@ class MainActivity : FlutterFragmentActivity() {
     private val KEY_CUSTOM_DNS2 = "custom_dns2"
     private val KEY_SPEED_TEST_URL = "speedTestUrl"
 
-    private val logStreamHandler = object : EventChannel.StreamHandler {
-        override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
-            if (events == null) return
+    private val logStreamHandler = RootLogStream(mainScope, onLine = { line ->
+        if (captureReady) currentAttempt?.add(line)
+    })
 
-            Thread {
+    private fun recordEvent(level: String, event: String, details: String = "") {
+        val attempt = currentAttempt
+        val line = logStreamHandler.event(level, event,
+            listOfNotNull(attempt?.let { "attempt=${it.id}" }, details.takeIf { it.isNotEmpty() }).joinToString(" "))
+        if (!captureReady) attempt?.add(line)
+        // VPN authorization/establishment occurs after the dialing record is inserted.
+        val id = lastLogId
+        if (attempt == null && id != null) {
+            mainScope.launch {
                 try {
-                    val logFile = File("/data/local/tmp/pppoe.log")
-                    if (!logFile.exists()) {
-                        logFile.createNewFile()
-                    }
-
-                    logStreamProcess = ProcessBuilder("tail", "-F", logFile.absolutePath)
-                        .redirectErrorStream(true)
-                        .start()
-
-                    logStreamReader = logStreamProcess?.inputStream?.bufferedReader()
-
-                    logStreamReader?.forEachLine { line ->
-                        if (line.isNotBlank()) {
-                            this@MainActivity.runOnUiThread {
-                                events.success(line)
-                                if (isCapturingLog) {
-                                    logBuffer.add(line)
-                                    if (logBuffer.size > 1000) {
-                                        logBuffer.removeFirstOrNull()
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    withContext(Dispatchers.IO) { db.logEntryDao().appendLog(id, "\n$line") }
                 } catch (e: Exception) {
-                    this@MainActivity.runOnUiThread {
-                        events.error("LOG_STREAM_ERROR", e.message, null)
-                    }
-                } finally {
-                    onCancel(null)
+                    if (e is CancellationException) throw e
+                    logStreamHandler.event("WARN", "history_write_failed", "Unable to append lifecycle event")
                 }
-            }.start()
-        }
-
-        override fun onCancel(arguments: Any?) {
-            try {
-                logStreamReader?.close()
-                logStreamProcess?.destroy()
-            } catch (e: Exception) {
             }
-            logStreamReader = null
-            logStreamProcess = null
         }
     }
 
-    private fun startDialingAndCaptureLog(flutterResult: MethodChannel.Result) {
+    private fun cancelDialing() {
+        val attempt = currentAttempt
+        if (attempt != null) recordEvent("INFO", "attempt_cancelled", "reason=user_or_activity_stop")
+        currentAttempt = null
+        captureReady = false
+        logStreamHandler.endCapture()
         monitoringJob?.cancel()
-        logBuffer.clear()
-        isCapturingLog = true
-        val startTime = System.currentTimeMillis()
-        var finalStatus = "Unknown"
-        var savedLogId: Long? = null
-        Log.d("MainActivity", "Starting dialing attempt and log capture.")
-
-        Thread {
-            val startSuccess = PppoeBridge.control("start")
-            if (!startSuccess) {
-                Log.e("MainActivity", "PppoeBridge.control('start') failed immediately.")
-                isCapturingLog = false
-                finalStatus = "Failure (Control)"
-                coroutineScope.launch {
-                    saveLogAttempt(startTime, finalStatus)
-                }
-                this@MainActivity.runOnUiThread {
-                    flutterResult.error("START_FAILED", "Failed to send start command", null)
-                }
-                return@Thread
-            }
-
-            monitoringJob = coroutineScope.launch {
-                var connectionUp = false
-                for (i in 0 until 10) {
+        monitoringJob = null
+        dialResult?.error("CANCELLED", "Dialing cancelled", null)
+        dialResult = null
+        if (attempt != null) {
+            val entry = LogEntry(timestamp = attempt.startedAt, logContent = attempt.content(), status = "Cancelled")
+            mainScope.launch(start = CoroutineStart.UNDISPATCHED) {
+                withContext(NonCancellable + Dispatchers.IO) {
                     try {
-                        val pingSuccess = PppoeBridge.checkConnectivity()
-
-                        if (pingSuccess) {
-                            Log.d("MainActivity", "Ping check successful.")
-                            connectionUp = true
-                            finalStatus = "Success (Ping)"
-                            break
-                        } else {
-                            Log.d("MainActivity", "Ping check failed, attempt ${i + 1}/10.")
-                        }
+                        db.logEntryDao().insert(entry)
                     } catch (e: Exception) {
-                        Log.e("MainActivity", "Error during connectivity check", e)
-                    }
-                    delay(500)
-                }
-
-                if (!connectionUp && isActive) {
-                    Log.w("MainActivity", "Connectivity check timed out after ~15 seconds.")
-                    finalStatus = "Timeout (Ping)"
-                }
-
-                isCapturingLog = false
-                savedLogId = saveLogAttempt(startTime, finalStatus)
-
-                withContext(Dispatchers.Main) {
-                    val resultMap = mapOf(
-                        "status" to finalStatus,
-                        "logId" to savedLogId
-                    )
-                    if (finalStatus.startsWith("Success")) {
-                        flutterResult.success(resultMap)
-                    } else {
-                        flutterResult.success(resultMap)
+                        android.util.Log.e("PPPoE", "Unable to persist cancelled attempt", e)
                     }
                 }
             }
-
-            runBlocking { monitoringJob?.join() }
-
-        }.start()
+        }
     }
 
-    private suspend fun saveLogAttempt(startTime: Long, status: String): Long? {
-        val capturedLog = logBuffer.joinToString("\n")
-        logBuffer.clear()
-        val entry = LogEntry(
-            timestamp = startTime,
-            logContent = capturedLog,
-            status = status
-        )
-        return try {
-            val insertedId = db.logEntryDao().insert(entry)
-            Log.d("MainActivity", "Saved log attempt with ID: $insertedId, Status: $status")
-            insertedId
-        } catch (e: Exception) {
-            Log.e("MainActivity", "Failed to save log entry to database", e)
-            null
+    private fun startDialingAndCaptureLog(result: MethodChannel.Result) {
+        if (monitoringJob?.isActive == true) {
+            result.error("BUSY", "A dialing attempt is already running", null)
+            return
+        }
+        val attempt = AttemptLog()
+        currentAttempt = attempt
+        captureReady = false
+        lastLogId = null
+        dialResult = result
+        monitoringJob = mainScope.launch {
+            try {
+                val status = try {
+                    logStreamHandler.beginCapture()
+                    captureReady = true
+                    recordEvent("INFO", "attempt_start")
+                    check(withContext(Dispatchers.IO) { PppoeBridge.control("start") }) {
+                        "Failed to send start command"
+                    }
+                    recordEvent("INFO", "command_sent", "action=start")
+                    delay(1500)
+                    var connected = false
+                    for (probe in 1..10) {
+                        if (withContext(Dispatchers.IO) { PppoeBridge.checkConnectivity() }) {
+                            connected = true
+                            break
+                        }
+                        // Each probe is detailed evidence, hidden by the default log view.
+                        recordEvent("DEBUG", "connectivity_probe", "interface=ppp0 probe=$probe result=no_reply")
+                        delay(500)
+                    }
+                    if (connected) "Success (PPPoE Ping)" else "Timeout (PPPoE Ping)"
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    if (!captureReady) recordEvent("INFO", "attempt_start")
+                    "Failure (${e.message ?: "Root operation failed"})"
+                }
+                if (captureReady) {
+                    try {
+                        logStreamHandler.drain()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        recordEvent("WARN", "capture_error", e.message ?: "Final log read failed")
+                    }
+                }
+                val elapsed = System.currentTimeMillis() - attempt.startedAt
+                when {
+                    status.startsWith("Success") -> recordEvent("INFO", "attempt_success", "elapsed_ms=$elapsed interface=ppp0")
+                    status.startsWith("Timeout") -> recordEvent("WARN", "attempt_timeout", "elapsed_ms=$elapsed reason=ppp0_ping_no_reply")
+                    else -> recordEvent("ERROR", "attempt_failed", status)
+                }
+                val entry = LogEntry(timestamp = attempt.startedAt, logContent = attempt.content(), status = LogSanitizer.sanitize(status))
+                // Freeze the completed attempt before the database suspension; a stop
+                // during insertion must not create a second cancelled copy.
+                currentAttempt = null
+                captureReady = false
+                logStreamHandler.endCapture()
+                val logId = withContext(Dispatchers.IO) { db.logEntryDao().insert(entry) }
+                lastLogId = logId
+                result.success(mapOf("status" to status, "logId" to logId))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                recordEvent("ERROR", "history_write_failed", "Unable to save dialing record")
+                result.error("START_FAILED", e.message, null)
+            } finally {
+                if (dialResult === result) {
+                    currentAttempt = null
+                    captureReady = false
+                    logStreamHandler.endCapture()
+                    dialResult = null
+                }
+            }
         }
     }
 
     override fun onDestroy() {
+        cancelDialing()
+        logStreamHandler.close()
+        flutterResult?.error("CANCELLED", "Activity destroyed", null)
+        flutterResult = null
+        vpnStartResult?.error("CANCELLED", "Activity destroyed", null)
+        vpnStartResult = null
+        mainScope.cancel()
         super.onDestroy()
-        monitoringJob?.cancel()
-        coroutineScope.cancel()
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -201,7 +208,7 @@ class MainActivity : FlutterFragmentActivity() {
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
             .setMethodCallHandler { call, result ->
-                Log.d("MainActivity", "MethodChannel received call: ${call.method}")
+                try {
                 when (call.method) {
                     "writeCreds" -> {
                         val user = call.argument<String>("user")
@@ -209,18 +216,12 @@ class MainActivity : FlutterFragmentActivity() {
                         if (user == null || pass == null) {
                             result.error("INVALID_ARGS", "User or pass cannot be null", null)
                         } else {
-                            Thread {
-                                val success = PppoeBridge.writeCreds(user, pass)
-                                this@MainActivity.runOnUiThread { result.success(success) }
-                            }.start()
+                            ioResult(result) { PppoeBridge.writeCreds(user, pass) }
                         }
                     }
                     "writeIface" -> {
                         val iface = call.argument<String>("iface")
-                        Thread {
-                            val success = PppoeBridge.writeIface(iface)
-                            this@MainActivity.runOnUiThread { result.success(success) }
-                        }.start()
+                        ioResult(result) { PppoeBridge.writeIface(iface) }
                     }
                     "writeMtuMru" -> {
                         val mtu = call.argument<Int>("mtu")
@@ -228,10 +229,7 @@ class MainActivity : FlutterFragmentActivity() {
                         if (mtu == null || mru == null) {
                             result.error("INVALID_ARGS", "MTU or MRU cannot be null", null)
                         } else {
-                            Thread {
-                                val success = PppoeBridge.writeMtuMru(mtu, mru)
-                                this@MainActivity.runOnUiThread { result.success(success) }
-                            }.start()
+                            ioResult(result) { PppoeBridge.writeMtuMru(mtu, mru) }
                         }
                     }
                     "control" -> {
@@ -239,21 +237,21 @@ class MainActivity : FlutterFragmentActivity() {
                         if (cmd == null) {
                             result.error("INVALID_ARGS", "Command cannot be null", null)
                         } else {
-                            Thread {
-                                val success = PppoeBridge.control(cmd)
-                                this@MainActivity.runOnUiThread { result.success(success) }
-                            }.start()
+                            if (cmd == "stop" || cmd == "cycle") cancelDialing()
+                            ioResult(result) { PppoeBridge.control(cmd) }
                         }
                     }
 
 
                     "readPeerEnv" -> {
-                        Thread {
-                            val env = PppoeBridge.readPeerEnv()
-                            this@MainActivity.runOnUiThread { result.success(env) }
-                        }.start()
+                        ioResult(result) { PppoeBridge.readPeerEnv() }
                     }
                     "prepareVpn" -> {
+                        if (flutterResult != null) {
+                            result.error("BUSY", "VPN permission request already pending", null)
+                            return@setMethodCallHandler
+                        }
+                        recordEvent("INFO", "vpn_prepare_requested")
                         val intent = VpnService.prepare(this)
                         if (intent != null) {
                             this.flutterResult = result
@@ -263,17 +261,14 @@ class MainActivity : FlutterFragmentActivity() {
                         }
                     }
                     "updateLogStatus" -> {
-                        val id = call.argument<Long>("id")
+                        val id = call.argument<Number>("id")?.toLong()
                         val status = call.argument<String>("status")
                         if (id == null || status == null) {
                             result.error("INVALID_ARGS", "ID and Status cannot be null", null)
                         } else {
-                            coroutineScope.launch {
-                                val entry = db.logEntryDao().getById(id)
-                                if (entry != null) {
-                                    entry.status = status
-                                    db.logEntryDao().update(entry)
-                                    Log.d("MainActivity", "Updated log entry $id status to: $status")
+                            launchResult(result) {
+                                val updated = withContext(Dispatchers.IO) { db.logEntryDao().updateStatus(id, LogSanitizer.sanitize(status)) }
+                                if (updated > 0) {
                                     withContext(Dispatchers.Main) { result.success(true) }
                                 } else {
                                     withContext(Dispatchers.Main) { result.error("NOT_FOUND", "Log entry not found for status update", null) }
@@ -285,9 +280,10 @@ class MainActivity : FlutterFragmentActivity() {
                         startDialingAndCaptureLog(result)
                     }
                     "stopVpn" -> {
-                        val i = Intent(this, PppoeVpnService::class.java)
-                            .setAction(PppoeVpnService.ACT_STOP)
-                        startService(i)
+                        vpnStartResult?.error("CANCELLED", "VPN start cancelled", null)
+                        vpnStartResult = null
+                        stopService(Intent(this, PppoeVpnService::class.java))
+                        recordEvent("INFO", "vpn_stop_requested")
                         result.success(true)
                     }
                     "shareLogAsText" -> {
@@ -316,7 +312,7 @@ class MainActivity : FlutterFragmentActivity() {
                         }
                     }
                     "getLogHistory" -> {
-                        coroutineScope.launch {
+                        launchResult(result) {
                             val history = db.logEntryDao().getAllSummaries()
                             val historyMapList = history.map {
                                 mapOf("id" to it.id, "timestamp" to it.timestamp, "note" to it.note, "status" to it.status)
@@ -327,12 +323,33 @@ class MainActivity : FlutterFragmentActivity() {
                         }
                     }
                     "startVpn" -> {
-                        Log.d("MainActivity", "[DEBUG] Received 'startVpn' call from Flutter.")
-                        val i = Intent(this, PppoeVpnService::class.java)
-                            .setAction(PppoeVpnService.ACT_START)
-                        startForegroundService(i)
-                        Log.d("MainActivity", "[DEBUG] Called startForegroundService for PppoeVpnService.")
-                        result.success(true)
+                        if (vpnStartResult != null) {
+                            result.error("BUSY", "VPN start already pending", null)
+                            return@setMethodCallHandler
+                        }
+                        vpnStartResult = result
+                        val receiver = object : ResultReceiver(Handler(Looper.getMainLooper())) {
+                            override fun onReceiveResult(code: Int, data: Bundle?) {
+                                if (vpnStartResult !== result) return
+                                vpnStartResult = null
+                                if (code == 1) {
+                                    recordEvent("INFO", "vpn_started", data?.getString("details") ?: "")
+                                    result.success(true)
+                                } else {
+                                    recordEvent("ERROR", "vpn_failed", data?.getString("error") ?: "VPN could not start")
+                                    result.error("VPN_FAILED", data?.getString("error") ?: "VPN could not start", null)
+                                }
+                            }
+                        }
+                        try {
+                            startForegroundService(Intent(this, PppoeVpnService::class.java)
+                                .setAction(PppoeVpnService.ACT_START)
+                                .putExtra(PppoeVpnService.EXTRA_RESULT, receiver))
+                        } catch (e: Exception) {
+                            vpnStartResult = null
+                            recordEvent("ERROR", "vpn_failed", e.message ?: "VPN service launch failed")
+                            result.error("VPN_FAILED", e.message, null)
+                        }
                     }
                     "getLogDetails" -> {
                         val idAsNumber = call.argument<Number>("id")
@@ -341,7 +358,7 @@ class MainActivity : FlutterFragmentActivity() {
                         if (id == null) {
                             result.error("INVALID_ARGS", "ID cannot be null", null)
                         } else {
-                            mainScope.launch {
+                            launchResult(result) {
                                 val entry = withContext(Dispatchers.IO) {
                                     db.logEntryDao().getById(id)
                                 }
@@ -369,16 +386,9 @@ class MainActivity : FlutterFragmentActivity() {
                         if (id == null) {
                             result.error("INVALID_ARGS", "ID cannot be null", null)
                         } else {
-                            mainScope.launch {
+                            launchResult(result) {
                                 val success = withContext(Dispatchers.IO) {
-                                    val entry = db.logEntryDao().getById(id)
-                                    if (entry != null) {
-                                        entry.note = note
-                                        db.logEntryDao().update(entry)
-                                        true
-                                    } else {
-                                        false
-                                    }
+                                    db.logEntryDao().updateNote(id, note) > 0
                                 }
 
                                 if (success) {
@@ -420,7 +430,7 @@ class MainActivity : FlutterFragmentActivity() {
                             result.error("INVALID_ARG", "ID is null or not a number", null)
                             return@setMethodCallHandler
                         }
-                        mainScope.launch {
+                        launchResult(result) {
                             try {
                                 val rowsDeleted = withContext(Dispatchers.IO) {
                                     db.logEntryDao().deleteById(id)
@@ -436,37 +446,10 @@ class MainActivity : FlutterFragmentActivity() {
                         }
                     }
                     "getNetworkInterfaces" -> {
-                        Log.d("MainActivity", "Handling 'getNetworkInterfaces' call.")
-                        Thread {
-                            var interfaces: List<String> = emptyList()
-                            try {
-                                val command = "ls /sys/class/net"
-                                Log.d("MainActivity", "Executing root command: $command")
-
-                                val result = Shell.cmd(command).exec()
-
-                                if (result.isSuccess) {
-                                    interfaces = result.out
-                                        .filterNotNull()
-                                        .filter { it.isNotBlank() }
-                                        .map { it.trim() }
-                                        .sorted()
-                                    Log.d("MainActivity", "Root command success. Interfaces found: $interfaces")
-                                } else {
-                                    Log.e("MainActivity", "Root command '$command' failed. Code: ${result.code}, Error: ${result.err.joinToString("\n")}")
-                                    interfaces = emptyList()
-                                }
-
-                            } catch (e: Exception) {
-                                Log.e("MainActivity", "Error executing root command for interfaces", e)
-                                interfaces = emptyList()
-                            } finally {
-                                this@MainActivity.runOnUiThread {
-                                    Log.d("MainActivity", "Returning interface list: $interfaces")
-                                    result.success(interfaces)
-                                }
-                            }
-                        }.start()
+                        ioResult(result) {
+                            RootShell.read("ls /sys/class/net").lineSequence()
+                                .map { it.trim() }.filter { it.isNotBlank() }.sorted().toList()
+                        }
                     }
 
                     "saveSpeedTestUrl" -> {
@@ -492,6 +475,9 @@ class MainActivity : FlutterFragmentActivity() {
                     }
 
                     else -> result.notImplemented()
+                }
+                } catch (e: Exception) {
+                    result.error("OPERATION_FAILED", e.message, null)
                 }
             }
     }
