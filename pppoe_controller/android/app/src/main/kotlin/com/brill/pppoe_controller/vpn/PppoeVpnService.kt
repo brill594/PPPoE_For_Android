@@ -12,6 +12,9 @@ import kotlinx.coroutines.*
 
 class PppoeVpnService : VpnService() {
     companion object {
+        @Volatile
+        var isActive: Boolean = false
+            private set
         const val ACT_START = "START_VPN"
         const val EXTRA_RESULT = "result"
         private const val NOTI_CH = "pppoe_vpn"
@@ -57,6 +60,7 @@ class PppoeVpnService : VpnService() {
     }
 
     private fun failStart(e: Exception) {
+        isActive = false
         pendingResult?.send(0, Bundle().apply { putString("error", e.message ?: "VPN establishment failed") })
         pendingResult = null
         stopSelf()
@@ -86,6 +90,7 @@ class PppoeVpnService : VpnService() {
         val established = checkNotNull(builder.establish()) { "VPN permission was revoked" }
         val previous = tun
         tun = established
+        isActive = true
         runCatching { previous?.close() }
         startForeground(NOTI_ID, notification("DNS: ${servers.joinToString(", ")}"))
         val source = if (custom.isNotEmpty()) "custom" else if (dns.isNotEmpty()) "peer" else "fallback"
@@ -104,9 +109,13 @@ class PppoeVpnService : VpnService() {
             .build()
     }
 
-    override fun onRevoke() { stopSelf() }
+    override fun onRevoke() {
+        isActive = false
+        stopSelf()
+    }
 
     override fun onDestroy() {
+        isActive = false
         scope.cancel()
         pendingResult?.send(0, Bundle().apply { putString("error", "VPN service stopped") })
         pendingResult = null

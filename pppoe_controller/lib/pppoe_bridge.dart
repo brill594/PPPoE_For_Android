@@ -40,6 +40,30 @@ class LogDetail extends LogSummary {
   }
 }
 
+class PppoeConnectionState {
+  final Map<String, String> peer;
+  final bool connected;
+  final bool running;
+  final bool vpnActive;
+  final String? pendingCommand;
+
+  const PppoeConnectionState({
+    this.peer = const {},
+    this.connected = false,
+    this.running = false,
+    this.vpnActive = false,
+    this.pendingCommand,
+  });
+
+  factory PppoeConnectionState.fromMap(Map<dynamic, dynamic> value) => PppoeConnectionState(
+    peer: Map<String, String>.from(value['peer'] as Map? ?? {}),
+    connected: value['connected'] == true,
+    running: value['running'] == true,
+    vpnActive: value['vpnActive'] == true,
+    pendingCommand: value['pendingCommand'] as String?,
+  );
+}
+
 class PppoeBridge {
   static const _channel = MethodChannel('pppoe/bridge');
   static const _logChannel = EventChannel('pppoe/log_stream');
@@ -120,8 +144,14 @@ class PppoeBridge {
     return m ?? <String, String>{};
   }
 
-  static Future<bool> prepareVpn() async {
-    final ok = await _channel.invokeMethod<bool>('prepareVpn');
+  static Future<PppoeConnectionState> getConnectionState() async {
+    final state = await _channel.invokeMapMethod<dynamic, dynamic>('getConnectionState');
+    if (state == null) throw StateError('Connection state unavailable');
+    return PppoeConnectionState.fromMap(state);
+  }
+
+  static Future<bool> prepareVpn({bool firstLaunchOnly = false}) async {
+    final ok = await _channel.invokeMethod<bool>('prepareVpn', {'firstLaunchOnly': firstLaunchOnly});
     return ok ?? false;
   }
 

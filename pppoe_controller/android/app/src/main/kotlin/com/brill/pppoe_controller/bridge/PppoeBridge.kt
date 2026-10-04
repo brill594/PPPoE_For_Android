@@ -8,11 +8,54 @@ object PppoeBridge {
     private fun f(name: String) = "$DIR/$name"
     private val ifacePattern = Regex("[a-zA-Z0-9_.:-]{1,15}")
 
-    fun checkConnectivity(): Boolean = RootShell.run(
-        "ip -4 addr show dev ppp0 | grep -q 'inet '",
-        "ping -I ppp0 -c 1 -W 1 1.1.1.1 >/dev/null 2>&1 || " +
-            "ping -I ppp0 -c 1 -W 1 8.8.4.4 >/dev/null 2>&1"
+    data class ConnectionState(
+        val peer: Map<String, String>,
+        val connected: Boolean,
+        val running: Boolean,
+        val pendingCommand: String?
     )
+
+    internal fun parseConnectionState(text: String): ConnectionState {
+        val lines = text.lineSequence().toList()
+        val peer = lines.filter { it.startsWith("peer:") }.mapNotNull {
+            val value = it.removePrefix("peer:")
+            val index = value.indexOf('=')
+            if (index <= 0) null else value.substring(0, index) to value.substring(index + 1)
+        }.toMap()
+        val addresses = lines.filter { it.startsWith("address:") }.map { it.removePrefix("address:") }
+        val connected = peer["IF"] == "ppp0" && !peer["IPLOCAL"].isNullOrBlank() &&
+            peer["IPLOCAL"] in addresses
+        return ConnectionState(peer, connected, "running:1" in lines,
+            lines.firstOrNull { it.startsWith("pending:") }?.removePrefix("pending:")
+                ?.takeIf { it in setOf("start", "stop", "cycle") })
+    }
+
+    fun getConnectionState(): ConnectionState = parseConnectionState(RootShell.read("""
+        [ "${'$'}(id -u)" = 0 ] || exit 1
+        if [ -f $DIR/pppoe_peer.env ]; then
+            sed 's/^/peer:/' $DIR/pppoe_peer.env || exit 1
+        fi
+        addresses=${'$'}(ip -4 -o addr show) || exit 1
+        printf '%s\n' "${'$'}addresses" | awk '${'$'}2 == "ppp0" && ${'$'}3 == "inet" {split(${'$'}4, a, "/"); print "address:" a[1]}'
+        pid=${'$'}(cat $DIR/pppd-pppoe0.pid 2>/dev/null)
+        case "${'$'}pid" in ''|*[!0-9]*|0|1) ;;
+            *) if [ -r "/proc/${'$'}pid/cmdline" ]; then
+                args=${'$'}(tr '\000' '\n' < "/proc/${'$'}pid/cmdline")
+                if printf '%s\n' "${'$'}args" | grep -qxF '$DIR/ppp_daemon' &&
+                   printf '%s\n' "${'$'}args" | grep -qxF '$DIR/ppp.options' &&
+                   kill -0 "${'$'}pid" 2>/dev/null; then printf 'running:1\n'; fi
+            fi ;;
+        esac
+        for control in $DIR/pppoe_control $DIR/pppoe_control.processing; do
+            if [ -f "${'$'}control" ]; then
+                pending=${'$'}(cat "${'$'}control") || exit 1
+                case "${'$'}pending" in start|stop|cycle) printf 'pending:%s\n' "${'$'}pending"; break ;; esac
+            fi
+        done
+        exit 0
+    """.trimIndent()))
+
+    fun checkConnectivity(): Boolean = getConnectionState().connected
 
     private fun writeFile(name: String, value: String): Boolean {
         val target = f(name)

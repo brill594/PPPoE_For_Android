@@ -133,16 +133,16 @@ class MainActivity : FlutterFragmentActivity() {
                     recordEvent("INFO", "command_sent", "action=start")
                     delay(1500)
                     var connected = false
-                    for (probe in 1..10) {
+                    for (probe in 1..30) {
                         if (withContext(Dispatchers.IO) { PppoeBridge.checkConnectivity() }) {
                             connected = true
                             break
                         }
                         // Each probe is detailed evidence, hidden by the default log view.
-                        recordEvent("DEBUG", "connectivity_probe", "interface=ppp0 probe=$probe result=no_reply")
-                        delay(500)
+                        recordEvent("DEBUG", "link_probe", "interface=ppp0 probe=$probe result=not_ready")
+                        delay(1000)
                     }
-                    if (connected) "Success (PPPoE Ping)" else "Timeout (PPPoE Ping)"
+                    if (connected) "Success (PPPoE Link)" else "Timeout (PPPoE Link)"
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -161,7 +161,7 @@ class MainActivity : FlutterFragmentActivity() {
                 val elapsed = System.currentTimeMillis() - attempt.startedAt
                 when {
                     status.startsWith("Success") -> recordEvent("INFO", "attempt_success", "elapsed_ms=$elapsed interface=ppp0")
-                    status.startsWith("Timeout") -> recordEvent("WARN", "attempt_timeout", "elapsed_ms=$elapsed reason=ppp0_ping_no_reply")
+                    status.startsWith("Timeout") -> recordEvent("WARN", "attempt_timeout", "elapsed_ms=$elapsed reason=ppp0_link_not_ready")
                     else -> recordEvent("ERROR", "attempt_failed", status)
                 }
                 val entry = LogEntry(timestamp = attempt.startedAt, logContent = attempt.content(), status = LogSanitizer.sanitize(status))
@@ -246,16 +246,36 @@ class MainActivity : FlutterFragmentActivity() {
                     "readPeerEnv" -> {
                         ioResult(result) { PppoeBridge.readPeerEnv() }
                     }
+                    "getConnectionState" -> {
+                        ioResult(result) {
+                            val state = PppoeBridge.getConnectionState()
+                            mapOf("peer" to state.peer, "connected" to state.connected,
+                                "running" to state.running, "pendingCommand" to state.pendingCommand,
+                                "vpnActive" to PppoeVpnService.isActive)
+                        }
+                    }
                     "prepareVpn" -> {
                         if (flutterResult != null) {
                             result.error("BUSY", "VPN permission request already pending", null)
                             return@setMethodCallHandler
                         }
-                        recordEvent("INFO", "vpn_prepare_requested")
+                        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                         val intent = VpnService.prepare(this)
+                        if (call.argument<Boolean>("firstLaunchOnly") == true &&
+                            prefs.getBoolean("vpn_prompted", false)) {
+                            result.success(intent == null)
+                            return@setMethodCallHandler
+                        }
+                        prefs.edit().putBoolean("vpn_prompted", true).apply()
+                        recordEvent("INFO", "vpn_prepare_requested")
                         if (intent != null) {
                             this.flutterResult = result
-                            vpnPermissionLauncher.launch(intent)
+                            try {
+                                vpnPermissionLauncher.launch(intent)
+                            } catch (e: Exception) {
+                                flutterResult = null
+                                throw e
+                            }
                         } else {
                             result.success(true)
                         }

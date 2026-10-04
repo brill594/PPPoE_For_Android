@@ -230,6 +230,14 @@ LogDiagnosis? diagnose(LogEntry entry) {
         20,
       );
     case 'attempt_timeout':
+      if (s.contains('ppp0_link_not_ready')) {
+        return result(
+          'PPPoE link negotiation has not completed',
+          'Check the interface and preceding discovery/authentication logs. The daemon may still be retrying; use the connection button to stop it.',
+          null,
+          20,
+        );
+      }
       return result(
         'Connectivity verification timed out',
         'A ping bound to PPP is inconclusive: ICMP may be blocked. Check assigned IP, route, DNS and actual traffic. This does not establish a PPP negotiation timeout.',

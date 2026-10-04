@@ -52,6 +52,31 @@ class _HomeState extends State<Home> {
   bool _isOperating = false;
   bool _isStopping = false;
   int _operation = 0;
+  bool _connected = false;
+  bool _daemonRunning = false;
+  bool _vpnActive = false;
+  bool _connectionKnown = false;
+  String? _pendingCommand;
+  String? _connectionError;
+  bool? _vpnPermissionGranted;
+  Future<bool>? _vpnPreparation;
+  Future<void>? _connectionRead;
+  int? _lastConnectionOperation;
+  bool _connectRequested = false;
+  bool _vpnActivationAttempted = false;
+  bool _suppressDisconnectNotice = false;
+
+  bool get _hasSession => _isOperating || _connected || _daemonRunning || _pendingCommand != null;
+
+  String get _connectionLabel {
+    if (_isStopping) return '正在断开…';
+    if (_connectionError != null) return '连接状态读取失败';
+    if (!_connectionKnown) return '正在检查连接…';
+    if (_isOperating) return _connected ? 'PPPoE 已连接，正在启用 VPN…' : '正在拨号…';
+    if (_connected) return _vpnActive ? '已连接 · VPN 已启用' : 'PPPoE 已连接 · VPN 未启用';
+    if (_daemonRunning || _pendingCommand != null) return '正在拨号 / 重试中…';
+    return _vpnPermissionGranted == false ? '未连接 · VPN 未授权' : '未连接';
+  }
 
   void _showMessage(String message, {bool error = false}) {
     if (!mounted) return;
@@ -74,6 +99,27 @@ class _HomeState extends State<Home> {
     _listenToLogStream();
     _loadDnsSettings();
     _loadSpeedTestUrl();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _requestVpnPermission(firstLaunchOnly: true);
+    });
+  }
+
+  Future<bool> _requestVpnPermission({bool firstLaunchOnly = false}) {
+    return _vpnPreparation ??= _prepareVpn(firstLaunchOnly).whenComplete(() => _vpnPreparation = null);
+  }
+
+  Future<bool> _prepareVpn(bool firstLaunchOnly) async {
+    try {
+      final granted = await PppoeBridge.prepareVpn(firstLaunchOnly: firstLaunchOnly);
+      if (mounted) setState(() => _vpnPermissionGranted = granted);
+      return granted;
+    } catch (e) {
+      if (mounted) {
+        setState(() => _vpnPermissionGranted = false);
+        _showMessage('VPN 授权请求失败：$e', error: true);
+      }
+      return false;
+    }
   }
 
   Future<void> _loadSpeedTestUrl() async {
@@ -144,19 +190,63 @@ class _HomeState extends State<Home> {
 
   void _startPeerPolling() {
     _poll?.cancel();
-    _poll = Timer.periodic(const Duration(seconds: 1), (_) async {
-      if (_isPolling) return;
-      _isPolling = true;
-      try {
-        final peer = await PppoeBridge.readPeerEnv();
-        if (mounted) setState(() => _peer = peer);
-      } catch (e) {
-        if (mounted && _peer.isNotEmpty) setState(() => _peer = {});
-        debugPrint('Failed to read peer environment: $e');
-      } finally {
-        _isPolling = false;
+    _refreshConnection();
+    _poll = Timer.periodic(const Duration(seconds: 1), (_) => _refreshConnection());
+  }
+
+  Future<void> _refreshConnection() {
+    return _connectionRead ??= _readConnection().whenComplete(() => _connectionRead = null);
+  }
+
+  Future<void> _readConnection() async {
+    final operation = _operation;
+    _isPolling = true;
+    try {
+      final state = await PppoeBridge.getConnectionState();
+      if (!_isCurrentOperation(operation)) return;
+      final restoringConnection = !_connectionKnown;
+      final becameConnected = !_connected && state.connected;
+      final disconnected = _connected && !state.connected;
+      setState(() {
+        _connectionKnown = true;
+        _connectionError = null;
+        _lastConnectionOperation = operation;
+        _peer = state.peer;
+        _connected = state.connected;
+        _daemonRunning = state.running;
+        _vpnActive = state.vpnActive;
+        _pendingCommand = state.pendingCommand;
+        if (!state.connected) _vpnActivationAttempted = false;
+      });
+      if (becameConnected && !_isStopping) _showMessage(restoringConnection ? '检测到已有 PPPoE 连接' : 'PPPoE 拨号成功，连接已建立');
+      if (disconnected && !_isOperating && !_isStopping && !_suppressDisconnectNotice) {
+        _showMessage('PPPoE 连接已断开', error: true);
       }
-    });
+      _suppressDisconnectNotice = false;
+      // A persistent daemon may finish negotiation after the initial attempt timed out.
+      if (_connectRequested && _connected && !_vpnActive && !_isOperating && !_vpnActivationAttempted) {
+        _activateVpnAfterReconnect(operation);
+      }
+    } catch (e) {
+      if (_isCurrentOperation(operation)) setState(() => _connectionError = '$e');
+    } finally {
+      _isPolling = false;
+    }
+  }
+
+  Future<void> _activateVpnAfterReconnect(int operation) async {
+    _vpnActivationAttempted = true;
+    try {
+      // Only use an existing grant here; automatic reconnect must not reopen a denied dialog.
+      _requireSuccess(await _requestVpnPermission(firstLaunchOnly: true), 'VPN 未授权，请断开后重新拨号授权');
+      if (!_isCurrentOperation(operation) || !_connectRequested || !_connected) return;
+      _requireSuccess(await PppoeBridge.startVpn(), 'VPN failed to start');
+      if (!_isCurrentOperation(operation)) return;
+      setState(() => _vpnActive = true);
+      _showMessage('拨号成功，PPPoE 与 VPN 已连接');
+    } catch (e) {
+      if (_isCurrentOperation(operation)) _showMessage('$e', error: true);
+    }
   }
 
   void _listenToLogStream() {
@@ -195,17 +285,20 @@ class _HomeState extends State<Home> {
   bool _isCurrentOperation(int operation) => mounted && operation == _operation;
 
   Future<void> _applyAndStart() async {
-    if (_isOperating) return;
+    if (_hasSession || !_connectionKnown || _connectionError != null) return;
     final operation = ++_operation;
     setState(() {
       _isOperating = true;
       _logs.clear();
+      _vpnActivationAttempted = false;
     });
-    _showMessage('Starting dialing attempt...');
+    _showMessage('正在准备拨号…');
     int? savedLogId;
     bool dialSucceeded = false;
     bool dialRequested = false;
     try {
+      _requireSuccess(await _requestVpnPermission(), 'VPN permission denied');
+      if (!_isCurrentOperation(operation)) return;
       _requireSuccess(await PppoeBridge.writeCreds(_user.text, _pass.text), 'Failed to save credentials');
       if (!_isCurrentOperation(operation)) return;
       final iface = _selectedInterface?.trim();
@@ -217,16 +310,18 @@ class _HomeState extends State<Home> {
       await _persistDnsSettings();
       if (!_isCurrentOperation(operation)) return;
       dialRequested = true;
+      _connectRequested = true;
       final result = await PppoeBridge.startDialingAttempt();
       if (!_isCurrentOperation(operation)) return;
       savedLogId = result['logId'] as int?;
       final status = result['status'] as String? ?? 'Failure (Unknown)';
       if (!status.startsWith('Success')) throw StateError(status);
       dialSucceeded = true;
-      _requireSuccess(await PppoeBridge.prepareVpn(), 'VPN permission denied');
-      if (!_isCurrentOperation(operation)) return;
+      _vpnActivationAttempted = true;
+      setState(() => _connected = true);
       _requireSuccess(await PppoeBridge.startVpn(), 'VPN failed to start');
       if (!_isCurrentOperation(operation)) return;
+      setState(() => _vpnActive = true);
       if (savedLogId != null) {
         final saved = await PppoeBridge.updateLogStatus(savedLogId, 'Success (VPN Started)');
         if (!saved) {
@@ -234,7 +329,7 @@ class _HomeState extends State<Home> {
           return;
         }
       }
-      if (_isCurrentOperation(operation)) _showMessage('Success (VPN Started)');
+      if (_isCurrentOperation(operation)) _showMessage('拨号成功，PPPoE 与 VPN 已连接');
     } catch (e) {
       if (!_isCurrentOperation(operation)) return;
       if (savedLogId == null) {
@@ -246,31 +341,22 @@ class _HomeState extends State<Home> {
       if (savedLogId != null && dialSucceeded) {
         await PppoeBridge.updateLogStatus(savedLogId, 'Failure ($e)');
       }
-      if (_isCurrentOperation(operation)) _showMessage('$e', error: true);
+      if (_isCurrentOperation(operation)) {
+        _suppressDisconnectNotice = true;
+        _showMessage('$e', error: true);
+      }
     } finally {
-      if (_isCurrentOperation(operation)) setState(() => _isOperating = false);
-    }
-  }
-
-  Future<void> _testStartVpn() async {
-    if (_isOperating) return;
-    final operation = ++_operation;
-    setState(() => _isOperating = true);
-    try {
-      _requireSuccess(await PppoeBridge.prepareVpn(), 'VPN permission denied');
-      if (!_isCurrentOperation(operation)) return;
-      _requireSuccess(await PppoeBridge.startVpn(), 'VPN failed to start');
-      if (_isCurrentOperation(operation)) _showMessage('VPN started.');
-    } catch (e) {
-      if (_isCurrentOperation(operation)) _showMessage('$e', error: true);
-    } finally {
-      if (_isCurrentOperation(operation)) setState(() => _isOperating = false);
+      if (_isCurrentOperation(operation)) {
+        setState(() => _isOperating = false);
+        _refreshConnection();
+      }
     }
   }
 
   Future<void> _stopAll() async {
     if (_isStopping) return;
     final operation = ++_operation;
+    _connectRequested = false;
     setState(() {
       _isStopping = true;
       _isOperating = true;
@@ -284,12 +370,23 @@ class _HomeState extends State<Home> {
         errors.add('$e');
       }
     }
+    var stopped = false;
+    for (var attempt = 0; attempt < 30 && _isCurrentOperation(operation); attempt++) {
+      await _refreshConnection();
+      if (_lastConnectionOperation == operation && _connectionError == null &&
+          !_connected && !_daemonRunning && !_vpnActive && _pendingCommand == null) {
+        stopped = true;
+        break;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+    }
     if (!_isCurrentOperation(operation)) return;
+    if (!stopped) errors.add('停止命令已发送，尚未确认断开，请重试');
     setState(() {
       _isStopping = false;
       _isOperating = false;
     });
-    _showMessage(errors.isEmpty ? 'Stopped.' : errors.join('; '), error: errors.isNotEmpty);
+    _showMessage(errors.isEmpty ? '连接已断开' : errors.join('; '), error: errors.isNotEmpty);
   }
 
   Future<void> _cycleInterface() async {
@@ -494,32 +591,21 @@ class _HomeState extends State<Home> {
               runSpacing: 8.0,
               alignment: WrapAlignment.start,
               children: [
-                ElevatedButton(
-                    onPressed: _isOperating ? null : _applyAndStart,
-                    child: const Text("启动拨号 + VPN")
-                ),
-                OutlinedButton(
-                  onPressed: _isStopping ? null : _stopAll,
-                  style: OutlinedButton.styleFrom(
-                    backgroundColor: NothingColors.redAccent,
-                    foregroundColor: NothingColors.white,
-                    side: BorderSide(color: NothingColors.redAccent),
+                ElevatedButton.icon(
+                  key: const ValueKey('connection-toggle'),
+                  onPressed: _isStopping ? null : _hasSession ? _stopAll
+                      : (!_connectionKnown || _connectionError != null) ? (_isPolling ? null : _refreshConnection) : _applyAndStart,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _hasSession ? NothingColors.redAccent : NothingColors.white,
+                    foregroundColor: _hasSession ? NothingColors.white : NothingColors.black,
                   ),
-                  child: const Text("停止"),
+                  icon: Icon(_hasSession ? Icons.stop_rounded : Icons.power_settings_new),
+                  label: Text(_isStopping ? '正在断开…' : _hasSession ? (_isOperating ? '取消拨号' : '断开连接')
+                      : (!_connectionKnown || _connectionError != null) ? '检查连接' : '启动拨号'),
                 ),
                 TextButton(
-                    onPressed: _isOperating ? null : _cycleInterface,
-                    child: const Text("切换接口")
-                ),
-                OutlinedButton(
-                  onPressed: _isOperating ? null : _testStartVpn,
-                  style: OutlinedButton.styleFrom(
-                    backgroundColor: NothingColors.white,
-                    foregroundColor: NothingColors.black,
-                    disabledBackgroundColor: const Color(0xFF1F1F1F),
-                    disabledForegroundColor: NothingColors.grey,
-                  ),
-                  child: const Text("Test VPN"),
+                  onPressed: _isOperating || !_connectionKnown || _connectionError != null ? null : _cycleInterface,
+                  child: const Text("切换接口"),
                 ),
               ],
             ),
@@ -530,15 +616,15 @@ class _HomeState extends State<Home> {
               child: AnimatedSwitcher(
                 duration: motionDuration(context),
                 child: Row(
-                  key: ValueKey(_isStopping ? 'stopping' : _isOperating ? 'working' : 'ready'),
+                  key: ValueKey(_connectionLabel),
                   children: [
                     Icon(
-                      _isStopping ? Icons.stop_circle_outlined : _isOperating ? Icons.sync : Icons.circle_outlined,
+                      _isStopping ? Icons.stop_circle_outlined : _connected ? Icons.check_circle : _isOperating || _daemonRunning ? Icons.sync : Icons.circle_outlined,
                       size: 14,
-                      color: _isStopping ? NothingColors.redAccent : NothingColors.grey,
+                      color: _isStopping || _connectionError != null ? NothingColors.redAccent : _connected ? NothingColors.white : NothingColors.grey,
                     ),
                     const SizedBox(width: 6),
-                    Text(_isStopping ? '正在停止…' : _isOperating ? '正在处理…' : '就绪'),
+                    Expanded(child: Text(_connectionLabel)),
                   ],
                 ),
               ),

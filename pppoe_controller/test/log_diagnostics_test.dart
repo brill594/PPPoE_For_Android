@@ -25,6 +25,13 @@ void main() {
       expect(diagnosis.summary, contains(rasReference));
     }
   });
+  test('link readiness timeout is distinct from legacy ICMP timeout', () {
+    final diagnosis = LogReport.parse('[WARN] [app] event=attempt_timeout reason=ppp0_link_not_ready').diagnosis!;
+    expect(diagnosis.cause, contains('link negotiation'));
+    expect(diagnosis.action, contains('retrying'));
+    expect(diagnosis.action, isNot(contains('ICMP')));
+    expect(diagnosis.windowsCode, isNull);
+  });
   test('local and generic failures never invent a Windows RAS code', () {
     for (final line in [
       'ping timeout',

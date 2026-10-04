@@ -24,4 +24,13 @@ class BridgeValidationTest {
         assertThrows(IllegalArgumentException::class.java) { PppoeBridge.writeMtuMru(1492, 1493) }
         assertThrows(IllegalArgumentException::class.java) { PppoeBridge.control("arbitrary command") }
     }
+    @Test
+    fun commandExitCannotTerminateTheReusableRootShell() {
+        val process = ProcessBuilder("sh", "-c", "${RootShell.isolated("exit 0")}\nprintf alive").start()
+        assertEquals("alive", process.inputStream.bufferedReader().readText())
+        assertEquals(0, process.waitFor())
+        val failure = ProcessBuilder("sh", "-c", RootShell.isolated("exit 7")).start()
+        assertEquals(7, failure.waitFor())
+    }
+
 }

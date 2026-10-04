@@ -30,8 +30,8 @@ void main() {
           return {'useCustom': false};
         case 'loadSpeedTestUrl':
           return 'https://example.com/test';
-        case 'readPeerEnv':
-          return <String, String>{};
+        case 'getConnectionState':
+          return {'peer': <String, String>{}, 'connected': false, 'running': false, 'vpnActive': false, 'pendingCommand': null};
         case 'startDialingAttempt':
           return {'status': 'Success', 'logId': 1};
         case 'getLogHistory':
@@ -52,33 +52,14 @@ void main() {
     override = (call) async => call.method == 'writeCreds' ? false : null;
     await tester.pumpWidget(const App());
     await tester.pump();
-    await tester.tap(find.text('启动拨号 + VPN'));
+    await tester.tap(find.byKey(const ValueKey('connection-toggle')));
     await tester.pump();
     expect(calls, isNot(contains('startDialingAttempt')));
     expect(find.descendant(of: find.byType(SnackBar), matching: find.textContaining('Failed to save credentials')), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
   });
 
-  testWidgets('stop invalidates pending dialing and blocks duplicate starts', (tester) async {
-    final dial = Completer<Object?>();
-    override = (call) async => call.method == 'startDialingAttempt' ? dial.future : null;
-    await tester.pumpWidget(const App());
-    await tester.pump();
-    await tester.tap(find.text('启动拨号 + VPN'));
-    await tester.pump();
-    await tester.tap(find.text('启动拨号 + VPN'));
-    await tester.pump();
-    expect(calls.where((call) => call == 'startDialingAttempt'), hasLength(1));
-    await tester.tap(find.text('停止'));
-    await tester.pump();
-    dial.complete({'status': 'Success', 'logId': 1});
-    await tester.pump();
-    expect(calls, contains('stopVpn'));
-    expect(calls, isNot(contains('startVpn')));
-    await tester.pumpWidget(const SizedBox());
-  });
-
-  testWidgets('operation indicators leave stop immediately available during transitions', (tester) async {
+  testWidgets('one toggle cancels dialing and invalidates late success', (tester) async {
     final dial = Completer<Object?>();
     final stop = Completer<Object?>();
     override = (call) async {
@@ -88,54 +69,246 @@ void main() {
     };
     await tester.pumpWidget(const App());
     await tester.pump();
-    expect(find.text('就绪'), findsOneWidget);
-    await tester.tap(find.text('启动拨号 + VPN'));
+    final toggle = find.byKey(const ValueKey('connection-toggle'));
+    expect(find.text('未连接'), findsOneWidget);
+    await tester.tap(toggle);
     await tester.pump();
-    expect(find.text('正在处理…'), findsOneWidget);
-    await tester.tap(find.text('停止'));
+    expect(find.text('取消拨号'), findsOneWidget);
+    expect(calls.where((call) => call == 'startDialingAttempt'), hasLength(1));
+    await tester.tap(toggle);
     await tester.pump();
-    expect(find.text('正在停止…'), findsOneWidget);
-    final stopButton = tester.widget<OutlinedButton>(find.widgetWithText(OutlinedButton, '停止'));
-    expect(stopButton.onPressed, isNull);
+    expect(tester.widget<ElevatedButton>(toggle).onPressed, isNull);
     stop.complete(true);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 200));
-    expect(find.text('就绪'), findsOneWidget);
-    expect(find.text('正在停止…'), findsNothing);
+    expect(find.text('启动拨号'), findsOneWidget);
     dial.complete({'status': 'Success', 'logId': 1});
     await tester.pump();
+    expect(calls, contains('stopVpn'));
     expect(calls, isNot(contains('startVpn')));
     await tester.pumpWidget(const SizedBox());
   });
 
+  testWidgets('successful dial remains visible after the transient notification and polling', (tester) async {
+    var connected = false;
+    override = (call) async {
+      if (call.method == 'startVpn') connected = true;
+      if (call.method == 'getConnectionState') {
+        return {'peer': {}, 'connected': connected, 'running': connected, 'vpnActive': connected};
+      }
+      return null;
+    };
+    await tester.pumpWidget(const App());
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('connection-toggle')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('拨号成功，PPPoE 与 VPN 已连接'), findsOneWidget);
+    expect(find.text('已连接 · VPN 已启用'), findsOneWidget);
+    expect(find.text('断开连接'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 6));
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.text('已连接 · VPN 已启用'), findsOneWidget);
+    expect(find.text('断开连接'), findsOneWidget);
+    expect(calls.where((call) => call == 'startDialingAttempt'), hasLength(1));
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('a timed-out dial that later connects enables VPN once and keeps the disconnect action', (tester) async {
+    var running = false;
+    var connected = false;
+    var vpnActive = false;
+    final permissionRequests = <bool>[];
+    override = (call) async {
+      if (call.method == 'prepareVpn') {
+        permissionRequests.add(call.arguments['firstLaunchOnly'] as bool);
+        return true;
+      }
+      if (call.method == 'startDialingAttempt') {
+        running = true;
+        return {'status': 'Failure (Timeout)', 'logId': 1};
+      }
+      if (call.method == 'startVpn') vpnActive = true;
+      if (call.method == 'getConnectionState') {
+        return {'peer': {}, 'connected': connected, 'running': running, 'vpnActive': vpnActive};
+      }
+      return null;
+    };
+    await tester.pumpWidget(const App());
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('connection-toggle')));
+    await tester.pump();
+    expect(find.text('正在拨号 / 重试中…'), findsOneWidget);
+    expect(find.text('断开连接'), findsOneWidget);
+    expect(calls, isNot(contains('startVpn')));
+    connected = true;
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('已连接 · VPN 已启用'), findsOneWidget);
+    expect(permissionRequests, [true, false, true]);
+    await tester.pump(const Duration(seconds: 2));
+    expect(calls.where((call) => call == 'startVpn'), hasLength(1));
+    expect(calls.where((call) => call == 'startDialingAttempt'), hasLength(1));
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('opening an existing connection allows disconnect without rewriting credentials', (tester) async {
+    var connected = true;
+    override = (call) async {
+      if (call.method == 'control') connected = false;
+      if (call.method == 'getConnectionState') {
+        return {'peer': {}, 'connected': connected, 'running': connected, 'vpnActive': false};
+      }
+      return null;
+    };
+    await tester.pumpWidget(const App());
+    await tester.pump();
+    expect(find.text('PPPoE 已连接 · VPN 未启用'), findsOneWidget);
+    expect(find.text('断开连接'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('connection-toggle')));
+    await tester.pump();
+    expect(calls, contains('control'));
+    expect(calls, isNot(contains('writeCreds')));
+    expect(find.text('启动拨号'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('stop acknowledgement keeps toggle disabled until the daemon actually exits', (tester) async {
+    var running = true;
+    override = (call) async => call.method == 'getConnectionState'
+        ? {'peer': {}, 'connected': false, 'running': running, 'vpnActive': false}
+        : null;
+    await tester.pumpWidget(const App());
+    await tester.pump();
+    final toggle = find.byKey(const ValueKey('connection-toggle'));
+    await tester.tap(toggle);
+    await tester.pump();
+    expect(calls, contains('stopVpn'));
+    expect(tester.widget<ElevatedButton>(toggle).onPressed, isNull);
+    await tester.pump(const Duration(seconds: 1));
+    expect(tester.widget<ElevatedButton>(toggle).onPressed, isNull);
+    running = false;
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.text('启动拨号'), findsOneWidget);
+    expect(tester.widget<ElevatedButton>(toggle).onPressed, isNotNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('startup permission and immediate dial share one pending permission request', (tester) async {
+    final permission = Completer<Object?>();
+    final requests = <bool>[];
+    override = (call) async {
+      if (call.method == 'prepareVpn') {
+        requests.add(call.arguments['firstLaunchOnly'] as bool);
+        return permission.future;
+      }
+      return null;
+    };
+    await tester.pumpWidget(const App());
+    await tester.pump();
+    expect(requests, [true]);
+    await tester.tap(find.byKey(const ValueKey('connection-toggle')));
+    await tester.pump();
+    expect(requests, [true]);
+    expect(calls, isNot(contains('writeCreds')));
+    permission.complete(true);
+    await tester.pump();
+    expect(calls.where((call) => call == 'startDialingAttempt'), hasLength(1));
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('denied VPN permission prevents dialing and explicit retry requests permission again', (tester) async {
+    final requests = <bool>[];
+    var granted = false;
+    override = (call) async {
+      if (call.method == 'prepareVpn') {
+        requests.add(call.arguments['firstLaunchOnly'] as bool);
+        return granted;
+      }
+      return null;
+    };
+    await tester.pumpWidget(const App());
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('connection-toggle')));
+    await tester.pump();
+    expect(requests, [true, false]);
+    expect(calls, isNot(contains('writeCreds')));
+    expect(calls, isNot(contains('startDialingAttempt')));
+    granted = true;
+    await tester.tap(find.byKey(const ValueKey('connection-toggle')));
+    await tester.pump();
+    expect(requests, [true, false, false]);
+    expect(calls.where((call) => call == 'startDialingAttempt'), hasLength(1));
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('unknown connection state cannot start another dial or claim connection', (tester) async {
+    override = (call) async {
+      if (call.method == 'getConnectionState') throw PlatformException(code: 'ROOT_FAILED');
+      return null;
+    };
+    await tester.pumpWidget(const App());
+    await tester.pump();
+    expect(find.text('连接状态读取失败'), findsOneWidget);
+    expect(find.text('已连接 · VPN 已启用'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('connection-toggle')));
+    await tester.pump();
+    expect(calls, isNot(contains('startDialingAttempt')));
+    expect(calls, isNot(contains('writeCreds')));
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('failed VPN establishment is never shown as success', (tester) async {
+    var connected = false;
+    override = (call) async {
+      if (call.method == 'startDialingAttempt') connected = true;
+      if (call.method == 'startVpn') return false;
+      if (call.method == 'getConnectionState') {
+        return {'peer': {}, 'connected': connected, 'running': connected, 'vpnActive': false};
+      }
+      return null;
+    };
+    await tester.pumpWidget(const App());
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('connection-toggle')));
+    await tester.pump();
+    expect(find.textContaining('VPN failed to start'), findsOneWidget);
+    expect(find.text('已连接 · VPN 已启用'), findsNothing);
+    expect(find.text('PPPoE 已连接 · VPN 未启用'), findsOneWidget);
+    expect(find.text('断开连接'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('a disconnect immediately after failed VPN activation preserves the actionable error', (tester) async {
     override = (call) async => call.method == 'startVpn' ? false : null;
     await tester.pumpWidget(const App());
     await tester.pump();
-    await tester.tap(find.text('启动拨号 + VPN'));
+    await tester.tap(find.byKey(const ValueKey('connection-toggle')));
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
     expect(find.textContaining('VPN failed to start'), findsOneWidget);
-    expect(find.text('Success (VPN Started)'), findsNothing);
+    expect(find.text('已连接 · VPN 已启用'), findsNothing);
+    expect(find.text('启动拨号'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
   });
 
   testWidgets('slow polling never overlaps and late results survive disposal', (tester) async {
     final peer = Completer<Object?>();
-    override = (call) async => call.method == 'readPeerEnv' ? peer.future : null;
+    override = (call) async => call.method == 'getConnectionState' ? peer.future : null;
     await tester.pumpWidget(const App());
     await tester.pump();
     await tester.pump(const Duration(seconds: 1));
     await tester.pump(const Duration(seconds: 3));
-    expect(calls.where((call) => call == 'readPeerEnv'), hasLength(1));
+    expect(calls.where((call) => call == 'getConnectionState'), hasLength(1));
     await tester.pumpWidget(const SizedBox());
-    peer.complete(<String, String>{'DNS1': '1.1.1.1'});
+    peer.complete({'peer': {'DNS1': '1.1.1.1'}, 'connected': false, 'running': false, 'vpnActive': false});
     await tester.pump();
     expect(tester.takeException(), isNull);
   });
 
   testWidgets('peer polling displays negotiated interface IP and DNS', (tester) async {
-    override = (call) async => call.method == 'readPeerEnv'
-        ? {'IF': 'ppp0', 'IPLOCAL': '192.0.2.1', 'DNS1': '1.1.1.1', 'DNS2': '8.8.8.8'}
+    override = (call) async => call.method == 'getConnectionState'
+        ? {'peer': {'IF': 'ppp0', 'IPLOCAL': '192.0.2.1', 'DNS1': '1.1.1.1', 'DNS2': '8.8.8.8'}, 'connected': false, 'running': false, 'vpnActive': false}
         : null;
     await tester.pumpWidget(const App());
     await tester.pump();
