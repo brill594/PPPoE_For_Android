@@ -13,8 +13,8 @@ android {
         applicationId = "com.brill.pppoe_controller"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = flutter.versionCode
+        versionName = flutter.versionName
     }
 
     buildTypes {
