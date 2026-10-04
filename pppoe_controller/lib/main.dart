@@ -51,6 +51,7 @@ class _HomeState extends State<Home> {
   bool _isPolling = false;
   bool _isOperating = false;
   bool _isStopping = false;
+  bool _stopUnconfirmed = false;
   int _operation = 0;
   bool _connected = false;
   bool _daemonRunning = false;
@@ -61,20 +62,24 @@ class _HomeState extends State<Home> {
   bool? _vpnPermissionGranted;
   Future<bool>? _vpnPreparation;
   Future<void>? _connectionRead;
+  Future<bool>? _rootStop;
+  bool _lastReadAfterRootStop = false;
   int? _lastConnectionOperation;
   bool _connectRequested = false;
   bool _vpnActivationAttempted = false;
   bool _suppressDisconnectNotice = false;
 
-  bool get _hasSession => _isOperating || _connected || _daemonRunning || _pendingCommand != null;
+  bool get _hasSession => _isOperating || _connected || _daemonRunning || _vpnActive || _stopUnconfirmed || _rootStop != null || _pendingCommand != null;
 
   String get _connectionLabel {
     if (_isStopping) return '正在断开…';
+    if (_stopUnconfirmed) return '尚未确认断开，请重试';
     if (_connectionError != null) return '连接状态读取失败';
     if (!_connectionKnown) return '正在检查连接…';
     if (_isOperating) return _connected ? 'PPPoE 已连接，正在启用 VPN…' : '正在拨号…';
     if (_connected) return _vpnActive ? '已连接 · VPN 已启用' : 'PPPoE 已连接 · VPN 未启用';
     if (_daemonRunning || _pendingCommand != null) return '正在拨号 / 重试中…';
+    if (_vpnActive) return 'VPN 已启用 · PPPoE 未连接';
     return _vpnPermissionGranted == false ? '未连接 · VPN 未授权' : '未连接';
   }
 
@@ -200,6 +205,7 @@ class _HomeState extends State<Home> {
 
   Future<void> _readConnection() async {
     final operation = _operation;
+    final afterRootStop = _rootStop == null;
     _isPolling = true;
     try {
       final state = await PppoeBridge.getConnectionState();
@@ -211,11 +217,15 @@ class _HomeState extends State<Home> {
         _connectionKnown = true;
         _connectionError = null;
         _lastConnectionOperation = operation;
+        _lastReadAfterRootStop = afterRootStop;
         _peer = state.peer;
         _connected = state.connected;
         _daemonRunning = state.running;
         _vpnActive = state.vpnActive;
         _pendingCommand = state.pendingCommand;
+        if (!_isStopping && afterRootStop && _rootStop == null && !state.connected && !state.running && !state.vpnActive && state.pendingCommand == null) {
+          _stopUnconfirmed = false;
+        }
         if (!state.connected) _vpnActivationAttempted = false;
       });
       if (becameConnected && !_isStopping) _showMessage(restoringConnection ? '检测到已有 PPPoE 连接' : 'PPPoE 拨号成功，连接已建立');
@@ -353,6 +363,11 @@ class _HomeState extends State<Home> {
     }
   }
 
+  Future<bool> _stopRoot() {
+    // A timeout only stops waiting; do not enqueue another native stop behind it.
+    return _rootStop ??= PppoeBridge.control('stop').whenComplete(() => _rootStop = null);
+  }
+
   Future<void> _stopAll() async {
     if (_isStopping) return;
     final operation = ++_operation;
@@ -362,31 +377,51 @@ class _HomeState extends State<Home> {
       _isOperating = true;
     });
     final errors = <String>[];
-    // Both cleanup operations must run even when one fails.
-    for (final action in [() => PppoeBridge.control('stop'), PppoeBridge.stopVpn]) {
-      try {
-        _requireSuccess(await action(), 'Stop command failed');
-      } catch (e) {
-        errors.add('$e');
-      }
-    }
     var stopped = false;
-    for (var attempt = 0; attempt < 30 && _isCurrentOperation(operation); attempt++) {
-      await _refreshConnection();
-      if (_lastConnectionOperation == operation && _connectionError == null &&
-          !_connected && !_daemonRunning && !_vpnActive && _pendingCommand == null) {
-        stopped = true;
-        break;
+    Future<void> stop() async {
+      // VPN cleanup must not wait for a blocked Root command.
+      await Future.wait([
+        _stopRoot,
+        PppoeBridge.stopVpn,
+      ].map((action) async {
+        try {
+          _requireSuccess(await action().timeout(const Duration(seconds: 5)), 'Stop command failed');
+        } catch (e) {
+          errors.add('$e');
+        }
+      }));
+      while (_isCurrentOperation(operation)) {
+        await _refreshConnection();
+        if (!_isCurrentOperation(operation)) return;
+        if (_rootStop == null && _lastReadAfterRootStop &&
+            _lastConnectionOperation == operation && _connectionError == null &&
+            !_connected && !_daemonRunning && !_vpnActive && _pendingCommand == null) {
+          stopped = true;
+          return;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 500));
       }
-      await Future<void>.delayed(const Duration(milliseconds: 500));
     }
-    if (!_isCurrentOperation(operation)) return;
-    if (!stopped) errors.add('停止命令已发送，尚未确认断开，请重试');
-    setState(() {
-      _isStopping = false;
-      _isOperating = false;
-    });
-    _showMessage(errors.isEmpty ? '连接已断开' : errors.join('; '), error: errors.isNotEmpty);
+
+    try {
+      // Bound the whole operation, including a native state query that never returns.
+      await stop().timeout(const Duration(seconds: 18));
+    } catch (e) {
+      errors.add('$e');
+    } finally {
+      if (_isCurrentOperation(operation)) {
+        // Keep a hung read single-flight, but discard its eventual stale result.
+        ++_operation;
+        setState(() {
+          _isStopping = false;
+          _isOperating = false;
+          _stopUnconfirmed = !stopped;
+          if (!stopped) _connectionError = '尚未确认断开，请重试';
+        });
+        if (!stopped) errors.add('尚未确认断开，请重试');
+        _showMessage(errors.isEmpty ? '连接已断开' : errors.join('; '), error: errors.isNotEmpty);
+      }
+    }
   }
 
   Future<void> _cycleInterface() async {

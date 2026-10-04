@@ -16,6 +16,7 @@ class PppoeVpnService : VpnService() {
         var isActive: Boolean = false
             private set
         const val ACT_START = "START_VPN"
+        const val ACT_STOP = "STOP_VPN"
         const val EXTRA_RESULT = "result"
         private const val NOTI_CH = "pppoe_vpn"
         private const val NOTI_ID = 101
@@ -27,12 +28,18 @@ class PppoeVpnService : VpnService() {
     private var pendingResult: ResultReceiver? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        @Suppress("DEPRECATION")
+        val receiver = intent?.getParcelableExtra<ResultReceiver>(EXTRA_RESULT)
         if (intent?.action != ACT_START) {
-            stopSelf()
+            try {
+                releaseVpn()
+                stopSelf()
+                receiver?.send(1, null)
+            } catch (e: Exception) {
+                receiver?.send(0, Bundle().apply { putString("error", e.message ?: "VPN close failed") })
+            }
             return START_NOT_STICKY
         }
-        @Suppress("DEPRECATION")
-        val receiver = intent.getParcelableExtra<ResultReceiver>(EXTRA_RESULT)
         if (startJob?.isActive == true) {
             receiver?.send(0, Bundle().apply { putString("error", "VPN start already pending") })
             return START_NOT_STICKY
@@ -60,9 +67,11 @@ class PppoeVpnService : VpnService() {
     }
 
     private fun failStart(e: Exception) {
-        isActive = false
         pendingResult?.send(0, Bundle().apply { putString("error", e.message ?: "VPN establishment failed") })
         pendingResult = null
+        runCatching { releaseVpn() }.onFailure {
+            android.util.Log.e("PppoeVpnService", "Unable to release failed VPN", it)
+        }
         stopSelf()
     }
 
@@ -109,19 +118,34 @@ class PppoeVpnService : VpnService() {
             .build()
     }
 
-    override fun onRevoke() {
+    private fun releaseVpn() {
+        startJob?.cancel()
+        startJob = null
+        pendingResult?.send(0, Bundle().apply { putString("error", "VPN service stopped") })
+        pendingResult = null
+        // Android can keep a stopped VpnService bound. Close the TUN before
+        // stopSelf instead of relying on a later onDestroy callback.
+        tun?.close()
+        tun = null
         isActive = false
-        stopSelf()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+    }
+
+    override fun onRevoke() {
+        scope.launch {
+            runCatching { releaseVpn() }.onFailure {
+                android.util.Log.e("PppoeVpnService", "Unable to release revoked VPN", it)
+            }
+            stopSelf()
+        }
     }
 
     override fun onDestroy() {
-        isActive = false
         scope.cancel()
-        pendingResult?.send(0, Bundle().apply { putString("error", "VPN service stopped") })
-        pendingResult = null
-        runCatching { tun?.close() }
-        tun = null
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        runCatching { releaseVpn() }.onFailure {
+            android.util.Log.e("PppoeVpnService", "Unable to release destroyed VPN", it)
+        }
+        isActive = false
         super.onDestroy()
     }
 }

@@ -21,6 +21,8 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.ResultReceiver
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 class MainActivity : FlutterFragmentActivity() {
     private val CHANNEL = "pppoe/bridge"
@@ -302,9 +304,27 @@ class MainActivity : FlutterFragmentActivity() {
                     "stopVpn" -> {
                         vpnStartResult?.error("CANCELLED", "VPN start cancelled", null)
                         vpnStartResult = null
-                        stopService(Intent(this, PppoeVpnService::class.java))
                         recordEvent("INFO", "vpn_stop_requested")
-                        result.success(true)
+                        launchResult(result) {
+                            val stopped = withTimeoutOrNull(4000) {
+                                suspendCancellableCoroutine<Boolean> { continuation ->
+                                    val receiver = object : ResultReceiver(Handler(Looper.getMainLooper())) {
+                                        override fun onReceiveResult(code: Int, data: Bundle?) {
+                                            if (!continuation.isActive) return
+                                            if (code == 1) continuation.resume(true)
+                                            else continuation.resumeWithException(IllegalStateException(
+                                                data?.getString("error") ?: "VPN close failed"))
+                                        }
+                                    }
+                                    startService(Intent(this@MainActivity, PppoeVpnService::class.java)
+                                        .setAction(PppoeVpnService.ACT_STOP)
+                                        .putExtra(PppoeVpnService.EXTRA_RESULT, receiver))
+                                }
+                            }
+                            check(stopped == true) { "VPN stop acknowledgement timed out" }
+                            recordEvent("INFO", "vpn_stopped")
+                            result.success(true)
+                        }
                     }
                     "shareLogAsText" -> {
                         try {

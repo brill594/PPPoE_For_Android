@@ -194,6 +194,98 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
+  testWidgets('blocked Root stop cannot prevent VPN cleanup or leave the toggle locked', (tester) async {
+    final root = Completer<Object?>();
+    var vpnActive = true;
+    override = (call) async {
+      if (call.method == 'control') return root.future;
+      if (call.method == 'stopVpn') vpnActive = false;
+      if (call.method == 'getConnectionState') {
+        return {'peer': {}, 'connected': false, 'running': false, 'vpnActive': vpnActive};
+      }
+      return null;
+    };
+    await tester.pumpWidget(const App());
+    await tester.pump();
+    final toggle = find.byKey(const ValueKey('connection-toggle'));
+    await tester.tap(toggle);
+    await tester.pump();
+    expect(calls, contains('stopVpn'));
+    expect(vpnActive, isFalse);
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump(const Duration(seconds: 13));
+    expect(tester.widget<ElevatedButton>(toggle).onPressed, isNotNull);
+    expect(find.text('断开连接'), findsOneWidget);
+    expect(find.text('尚未确认断开，请重试'), findsOneWidget);
+    await tester.tap(toggle);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump(const Duration(seconds: 13));
+    expect(calls.where((call) => call == 'control'), hasLength(1));
+    expect(find.text('断开连接'), findsOneWidget);
+    expect(tester.widget<ElevatedButton>(toggle).onPressed, isNotNull);
+    root.complete(true);
+    await tester.pump();
+    expect(find.text('断开连接'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.text('启动拨号'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('stalled verification is bounded and late reads cannot erase retry state', (tester) async {
+    final state = Completer<Object?>();
+    var stall = false;
+    override = (call) async {
+      if (call.method == 'control') stall = true;
+      if (call.method == 'getConnectionState') {
+        if (stall) return state.future;
+        return {'peer': {}, 'connected': true, 'running': true, 'vpnActive': true};
+      }
+      return null;
+    };
+    await tester.pumpWidget(const App());
+    await tester.pump();
+    final toggle = find.byKey(const ValueKey('connection-toggle'));
+    await tester.tap(toggle);
+    await tester.pump();
+    final reads = calls.where((call) => call == 'getConnectionState').length;
+    await tester.pump(const Duration(seconds: 18));
+    expect(tester.widget<ElevatedButton>(toggle).onPressed, isNotNull);
+    expect(find.text('断开连接'), findsOneWidget);
+    expect(find.text('尚未确认断开，请重试'), findsOneWidget);
+    await tester.tap(toggle);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 18));
+    expect(calls.where((call) => call == 'stopVpn'), hasLength(2));
+    expect(calls.where((call) => call == 'getConnectionState'), hasLength(reads));
+    state.complete({'peer': {}, 'connected': false, 'running': false, 'vpnActive': false});
+    await tester.pump();
+    expect(find.text('断开连接'), findsOneWidget);
+    expect(find.text('尚未确认断开，请重试'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('VPN without a PPP session remains visible and can be disconnected', (tester) async {
+    var vpnActive = true;
+    override = (call) async {
+      if (call.method == 'stopVpn') vpnActive = false;
+      if (call.method == 'getConnectionState') {
+        return {'peer': {}, 'connected': false, 'running': false, 'vpnActive': vpnActive};
+      }
+      return null;
+    };
+    await tester.pumpWidget(const App());
+    await tester.pump();
+    expect(find.text('VPN 已启用 · PPPoE 未连接'), findsOneWidget);
+    expect(find.text('断开连接'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('connection-toggle')));
+    await tester.pump();
+    expect(calls, contains('stopVpn'));
+    expect(calls, isNot(contains('startDialingAttempt')));
+    expect(find.text('启动拨号'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('startup permission and immediate dial share one pending permission request', (tester) async {
     final permission = Completer<Object?>();
     final requests = <bool>[];
